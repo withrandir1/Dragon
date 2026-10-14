@@ -42,7 +42,7 @@ details summary{cursor:pointer;color:var(--mut)}
   <div class="stats" id="stats"></div>
   <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><span class="mut" id="scan"></span><button onclick="post('/api/scan')">Сканировать сейчас</button></div>
 </header>
-<div id="err" class="err" style="padding:0 16px"></div>
+<div id="err" class="err" style="padding:0 16px"></div><div id="terr" class="err" style="padding:0 16px"></div>
 <main>
 <div>
   <section>
@@ -78,15 +78,16 @@ let LIVE={};
 const sp=(v,d=2)=>v==null?'<span class="mut">·</span>':`<span class="${v>0?'pos':v<0?'neg':'mut'}">${v>0?'+':''}${v.toFixed(d)}%</span>`;
 const TR={accel:'<span class="pos" title="ускоряется">⇡</span>',decel:'<span class="neg" title="замедляется">⇣</span>',flat:'<span class="mut" title="ровно">→</span>'};
 function velHtml(v){
-  if(!v)return '<span class="mut">нет live-цены</span>';
+  if(!v)return '<span class="mut">ждём первый скан…</span>';
+  if(v.status&&v.v1===undefined)return `<span class="${/ошибка|не знает|пуст/.test(v.status)?'neg':'mut'}">${esc(v.status)}</span>`;
   const i=v.inertia;
-  return `<div class="vrow">${sp(v.v1,2)} ${sp(v.v15,1)} ${sp(v.v30,1)}</div><div class="inert ${i>0?'pos':i<0?'neg':'mut'}">${i==null?'копим 30с…':(i>0?'+':'')+i.toFixed(1)+'%/мин'} ${TR[v.trend]||''}</div>`;
+  return `<div class="vrow">${sp(v.v1,2)} ${sp(v.v15,1)} ${sp(v.v30,1)}</div><div class="inert ${i>0?'pos':i<0?'neg':'mut'}">${i==null?'копим 30с…':(i>0?'+':'')+i.toFixed(1)+'%/мин'} ${TR[v.trend]||''}</div><div class="mut" style="font-size:10px">${v.src==='chain'?'on-chain':v.src==='dexscreener'?'DexScreener':''}</div>`;
 }
 function applyLive(l){
   LIVE=l||{};
   for(const [m,v] of Object.entries(LIVE.velocity||{})){const el=document.getElementById('v_'+m);if(el)el.innerHTML=velHtml(v);const pe=document.getElementById('pv_'+m);if(pe)pe.innerHTML=velHtml(v)}
   for(const [m,p] of Object.entries(LIVE.positions||{})){const el=document.getElementById('pnl_'+m);if(el){el.className=p.pnl_pct>=0?'pos':'neg';el.textContent=(p.pnl_pct>=0?'+':'')+p.pnl_pct.toFixed(1)+'%'}}
-  if(LIVE.ticker_error)$('err').textContent='Тикер: '+LIVE.ticker_error;
+  $('terr').textContent=LIVE.ticker_error?'Тикер: '+LIVE.ticker_error:'';
 }
 async function loadLive(){try{applyLive(await (await fetch('/api/live')).json())}catch(e){}}
 async function post(u,body){const r=await fetch(u,{method:'POST',body:body?JSON.stringify(body):undefined});return r.json()}

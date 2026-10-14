@@ -16,7 +16,7 @@ PENDING_TTL = 120   # how long an entry signal waits for 30s of live price data
 
 
 class Engine:
-    def __init__(self, cfg: Config = None, gecko=None, rpc=None):
+    def __init__(self, cfg: Config = None, gecko=None, rpc=None, dex=None):
         self.cfg = cfg or Config.load()
         self.gecko = gecko or Gecko(self.cfg.gecko_min_interval_sec)
         self.rpc = rpc or SolanaRPC(self.cfg.solana_rpc_url)
@@ -31,7 +31,7 @@ class Engine:
         self.last_error = None
         self.scanning = False
         self.pending = {}           # mint -> {"p", "h", "until"}: entry waiting for live momentum
-        self.ticker = PriceTicker(self.rpc, self.cfg.tick_interval_sec)
+        self.ticker = PriceTicker(self.rpc, self.cfg.tick_interval_sec, dex=dex)
         self.ticker.on_tick = self.on_tick
         self._wake = threading.Event()
         self._load()
@@ -142,7 +142,7 @@ class Engine:
     @staticmethod
     def momentum(vel):
         """True = rising on 15s and 30s, False = not rising, None = not enough live data yet."""
-        if not vel or vel.get("v15") is None or vel.get("v30") is None:
+        if not vel or "v15" not in vel or vel.get("v15") is None or vel.get("v30") is None:
             return None
         return vel["v15"] > 0 and vel["v30"] > 0
 

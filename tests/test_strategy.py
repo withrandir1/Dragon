@@ -10,7 +10,7 @@ import memescan.config as config_mod
 from memescan import strategy as S, whales as W
 from memescan.config import Config
 from memescan.solana_util import b58encode, find_program_address, PUMP_PROGRAM, is_on_curve, b58decode
-from tests.fakes import FakeGecko, FakeRPC, pool, trades
+from tests.fakes import FakeGecko, FakeRPC, FakeDex, pool, trades
 
 MINT = "Meme111111111111111111111111111111111111pump"
 NEW = "New1111111111111111111111111111111111111pump"
@@ -142,7 +142,7 @@ class TestEngine(unittest.TestCase):
         self.g.pools = [pool("pMEME", MINT, "MEME", price=0.01), pool("pNEW", NEW, "NEW", age_h=3)]
         self.g.trades_by_pool = {"pMEME": trades(1000, 40, 500, 20), "pNEW": trades(5000, 100, 10, 1)}
         self.rpc = FakeRPC(holders=clean_holders(), creator=CREATOR, creator_amount=5_000_000)
-        self.e = eng.Engine(Config(entry_require_momentum=False), gecko=self.g, rpc=self.rpc)
+        self.e = eng.Engine(Config(entry_require_momentum=False), gecko=self.g, rpc=self.rpc, dex=FakeDex())
 
     def tearDown(self):
         config_mod.DATA_DIR, self.eng_mod.DATA_DIR = self._old
@@ -223,6 +223,48 @@ class TestVelocity(unittest.TestCase):
         self.assertEqual(v["v1"], 0.0)
 
 
+class TestTickerRoutes(unittest.TestCase):
+    def test_pumpswap_layout_parsed_and_verified(self):
+        from memescan.ticker import PriceTicker, PUMPSWAP_PROGRAM, pumpswap_vaults
+        mint = b58encode(b"\x09" * 32)   # real mints are 32-byte keys
+        bv, qv = b58encode(b"\x01" * 32), b58encode(b"\x02" * 32)
+        data = bytes(43) + b58decode(mint) + bytes(64) + b58decode(bv) + b58decode(qv) + bytes(40)
+        self.assertEqual(pumpswap_vaults(data, mint), (bv, qv))
+        self.assertIsNone(pumpswap_vaults(data, CREATOR))           # wrong mint -> layout not trusted
+        rpc = FakeRPC()
+        rpc.raw_accounts["poolPS"] = (PUMPSWAP_PROGRAM, data)
+        rpc.balances[f"ta_{bv}"], rpc.balances[f"ta_{qv}"] = 1_000_000, 50.0
+        # vault addresses from pool data are plain pubkeys; map them to fake token accounts
+        rpc.multiple_accounts = lambda addrs: [{"data": {"parsed": {"info": {"tokenAmount": {
+            "uiAmount": rpc.balances.get(f"ta_{a}", 0)}}}}} for a in addrs]
+        t = PriceTicker(rpc, dex=FakeDex())
+        t.set_watch({mint: "poolPS"})
+        t.tick(now=1000)
+        self.assertEqual(t.route["poolPS"][0], "chain")
+        self.assertAlmostEqual(t.price(mint), 50.0 / 1_000_000)
+        self.assertEqual(t.velocity(mint, 1000)["src"], "chain")
+
+    def test_unknown_amm_falls_back_to_dexscreener(self):
+        from memescan.ticker import PriceTicker
+        dex = FakeDex()
+        dex.price["poolRAY"] = 0.00042
+        t = PriceTicker(FakeRPC(), dex=dex)
+        t.set_watch({MINT: "poolRAY"})
+        t.tick(now=1000)
+        self.assertEqual(t.route["poolRAY"], ("dexscreener",))
+        self.assertEqual(t.velocity(MINT, 1000)["src"], "dexscreener")
+        t.tick(now=1000.5)                                     # throttled to every 2s
+        self.assertEqual(dex.calls, 1)
+
+    def test_status_before_data(self):
+        from memescan.ticker import PriceTicker
+        t = PriceTicker(FakeRPC(), dex=FakeDex())
+        t.set_watch({MINT: "poolX"})
+        self.assertEqual(t.velocity(MINT)["status"], "ищу пул…")
+        t.tick(now=1000)
+        self.assertEqual(t.velocity(MINT)["status"], "DexScreener не знает пул")
+
+
 class TestMomentumAndLive(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -235,7 +277,7 @@ class TestMomentumAndLive(unittest.TestCase):
         self.g.trades_by_pool = {"pMEME": trades(1000, 40, 500, 20)}
         self.rpc = FakeRPC(holders=clean_holders(), creator=CREATOR, creator_amount=5_000_000)
         self.rpc.add_pool("pMEME", MINT, base=1_000_000, quote=100.0)
-        self.e = eng.Engine(Config(), gecko=self.g, rpc=self.rpc)
+        self.e = eng.Engine(Config(), gecko=self.g, rpc=self.rpc, dex=FakeDex())
 
     def tearDown(self):
         config_mod.DATA_DIR, self.eng_mod.DATA_DIR = self._old

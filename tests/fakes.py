@@ -66,6 +66,7 @@ class FakeRPC:
         self.balances = {f"ta_{o}": amt for o, amt, _, _ in holders}
         self.creator = creator
         self.pool_vaults = {}   # (pool, mint) -> token account
+        self.raw_accounts = {}  # address -> (owner_program, bytes)
         if creator and f"ta_{creator}" not in self.balances:
             self.balances[f"ta_{creator}"] = creator_amount
         self.calls = 0
@@ -91,6 +92,9 @@ class FakeRPC:
                 h = next((h for h in self.holders if h[0] == a), None)
                 out.append({"owner": SYS if h and h[2] else AMM})
         return out
+
+    def multiple_accounts_raw(self, addrs):
+        return [self.raw_accounts.get(a) for a in addrs]
 
     def account_bytes(self, address):
         if not self.creator:
@@ -121,3 +125,13 @@ class FakeRPC:
             {"program": "system", "parsed": {"type": "transfer",
                                              "info": {"source": funder, "destination": wallet, "lamports": 1}}}]}},
                 "meta": {"innerInstructions": []}}
+
+
+class FakeDex:
+    def __init__(self):
+        self.price = {}
+        self.calls = 0
+
+    def prices(self, pools):
+        self.calls += 1
+        return {p: self.price[p] for p in pools if p in self.price}

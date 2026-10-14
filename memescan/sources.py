@@ -86,6 +86,27 @@ class Gecko:
         return self._get(f"/pools/{pool_address}").get("data")
 
 
+class DexScreener:
+    """Fallback live price for pools we can't read on-chain (Raydium, Meteora, ...). ~300 req/min."""
+
+    URL = "https://api.dexscreener.com/latest/dex/pairs/solana/"
+
+    def __init__(self, http=_http):
+        self._http = http
+
+    def prices(self, pools):
+        """{pool: price_native} for up to 30 pools per request."""
+        out = {}
+        for i in range(0, len(pools), 30):
+            res = self._http(self.URL + ",".join(pools[i:i + 30]))
+            for pr in res.get("pairs") or []:
+                try:
+                    out[pr["pairAddress"]] = float(pr["priceNative"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+        return out
+
+
 class SolanaRPC:
     SYSTEM_PROGRAM = "11111111111111111111111111111111"
 
@@ -137,6 +158,15 @@ class SolanaRPC:
         res = self.call("getTokenAccountsByOwner", [owner, {"mint": mint}, {"encoding": "jsonParsed"}])["value"]
         return [(a["pubkey"], float(a["account"]["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount") or 0))
                 for a in res]
+
+    def multiple_accounts_raw(self, addresses):
+        """[(owner_program, bytes) | None] for each address (base64)."""
+        import base64
+        out = []
+        for i in range(0, len(addresses), 100):
+            for v in self.call("getMultipleAccounts", [addresses[i:i + 100], {"encoding": "base64"}])["value"]:
+                out.append((v["owner"], base64.b64decode(v["data"][0])) if v else None)
+        return out
 
     def multiple_accounts(self, addresses):
         out = []
