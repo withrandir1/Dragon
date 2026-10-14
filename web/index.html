@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Memescan</title>
+<style>
+:root{--bg:#0d0f14;--panel:#151922;--line:#232a36;--fg:#e6e9ef;--mut:#8a93a6;--buy:#22c55e;--sell:#ef4444;--warn:#f59e0b;--acc:#7c9cff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:14px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0}h2{font-size:14px;margin:0 0 10px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.badge{padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600;background:#2a2f3c}
+.paper{background:#3b2f0b;color:var(--warn)}
+.entry{background:#0f3a22;color:var(--buy)}.holding{background:#1e2a55;color:var(--acc)}.rejected{background:#3a1414;color:var(--sell)}.watch{color:var(--mut)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:16px;padding:16px}
+@media(max-width:1000px){main{grid-template-columns:minmax(0,1fr)}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:16px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{padding:7px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th{color:var(--mut);font-weight:500;font-size:12px}th:first-child,td:first-child{text-align:left}
+tr:hover td{background:#1a1f2a}
+.bar{position:relative;height:16px;width:110px;background:var(--sell);border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:var(--buy)}.bar b{position:absolute;left:50%;top:0;bottom:0;width:1px;background:#fff6}
+.bar span{position:relative;font-size:11px;font-weight:700;padding-left:5px;line-height:16px}
+.mut{color:var(--mut)}.pos{color:var(--buy)}.neg{color:var(--sell)}
+button{background:#232a36;color:var(--fg);border:1px solid #2f3747;border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}
+button:hover{border-color:var(--acc)}
+a{color:var(--acc);text-decoration:none}
+.stats{display:flex;gap:18px;flex-wrap:wrap;color:var(--mut);font-size:13px}.stats b{color:var(--fg)}
+.err{color:var(--sell);font-size:13px}
+.reasons{font-size:12px;color:var(--mut);white-space:normal;text-align:left}
+.ev{font-size:13px;padding:5px 0;border-bottom:1px solid var(--line)}
+#holders{display:none}
+.cfg{display:grid;grid-template-columns:1fr 110px;gap:6px 8px;font-size:12px}.cfg input{width:100%;background:#0d0f14;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 5px}
+details summary{cursor:pointer;color:var(--mut)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Memescan</h1><span class="badge paper">PAPER — без реальных сделок</span>
+  <div class="stats" id="stats"></div>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><span class="mut" id="scan"></span><button onclick="post('/api/scan')">Сканировать сейчас</button></div>
+</header>
+<div id="err" class="err" style="padding:0 16px"></div>
+<main>
+<div>
+  <section>
+    <h2>Топ-10 по перевесу покупок (прошли анти-скам фильтр)</h2>
+    <table><thead><tr><th>Монета</th><th>Возраст</th><th>Ликвидность</th><th>FDV</th><th>Объём 24ч</th><th>Покупки 5м</th><th>Покупки 15м</th><th>Buy $ 15м</th><th>Покуп./Прод.</th><th>Сигнал</th><th></th></tr></thead>
+    <tbody id="rows"><tr><td colspan="11" class="mut">Первый скан идёт ~30–60 сек…</td></tr></tbody></table>
+  </section>
+  <section id="holders"></section>
+  <section>
+    <h2>Закрытые сделки</h2>
+    <table><thead><tr><th>Монета</th><th>Вход</th><th>Выход</th><th>Держали</th><th>PnL</th><th>Причина выхода</th></tr></thead><tbody id="closed"></tbody></table>
+  </section>
+</div>
+<div>
+  <section><h2>Открытые позиции</h2><div id="positions" class="mut">нет</div></section>
+  <section><h2>Правила</h2><div class="reasons" style="font-size:13px;line-height:1.6" id="rules"></div>
+    <details style="margin-top:10px"><summary>Настройки</summary><div class="cfg" id="cfg" style="margin-top:8px"></div><button style="margin-top:8px" onclick="saveCfg()">Сохранить</button></details></section>
+  <section><h2>Журнал</h2><div id="events"></div></section>
+</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const usd=v=>v==null?'—':'$'+(v>=1e9?(v/1e9).toFixed(2)+'B':v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(1)+'K':(+v).toFixed(0));
+const pct=(v,d=0)=>(v*100).toFixed(d)+'%';
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ago=t=>{if(!t)return'—';const s=Date.now()/1000-t;return s<60?Math.round(s)+'с':s<3600?Math.round(s/60)+'м':s<86400?(s/3600).toFixed(1)+'ч':(s/86400).toFixed(1)+'д'};
+const dur=s=>s<3600?Math.round(s/60)+'м':(s/3600).toFixed(1)+'ч';
+const bar=v=>`<span class="bar"><i style="width:${(v*100).toFixed(0)}%"></i><b></b><span>${pct(v)}</span></span>`;
+const SIG={entry:'ВХОД',holding:'В позиции',rejected:'Отсев',watch:'наблюдаем'};
+async function post(u,body){const r=await fetch(u,{method:'POST',body:body?JSON.stringify(body):undefined});return r.json()}
+let CFG=null;
+
+function render(s){
+  const st=s.stats||{};
+  $('stats').innerHTML=`<span>пулов <b>${st.pools??'—'}</b></span><span>прошли фильтр <b>${st.passed_filter??'—'}</b></span><span>сделок <b>${st.trades}</b></span><span>winrate <b>${st.winrate==null?'—':pct(st.winrate)}</b></span><span>PnL <b class="${st.pnl_usd>=0?'pos':'neg'}">${st.pnl_usd>=0?'+':''}$${st.pnl_usd}</b></span>`;
+  $('scan').textContent=s.scanning?'сканирую…':'скан '+ago(s.last_scan)+' назад';
+  $('err').textContent=s.last_error?'Ошибка: '+s.last_error:'';
+  $('rows').innerHTML=s.rows.length?s.rows.map(p=>{
+    const f=p.flow, why=[...(p.entry_missing||[]),...(p.holder_reasons||[])];
+    return `<tr><td><a href="https://dexscreener.com/solana/${esc(p.pool)}" target="_blank" rel="noopener"><b>${esc(p.symbol)}</b></a><div class="mut" style="font-size:11px">${esc(p.dex)}</div></td>
+    <td>${p.age_hours>48?(p.age_hours/24).toFixed(0)+'д':Math.round(p.age_hours)+'ч'}</td><td>${usd(p.liquidity_usd)}</td><td>${usd(p.fdv_usd)}</td><td>${usd(p.volume_24h)}</td>
+    <td>${bar(f['5m'].buy_share)}</td><td>${bar(f['15m'].buy_share)}</td><td>${usd(f['15m'].buy_usd)}</td><td>${f['15m'].buyers}/${f['15m'].sellers}</td>
+    <td title="${esc(why.join('\n'))}"><span class="badge ${p.signal}">${SIG[p.signal]}</span>${why.length&&p.signal!=='holding'?`<div class="reasons">${esc(why[0])}</div>`:''}</td>
+    <td><button onclick="holders('${esc(p.mint)}','${esc(p.symbol)}')">Холдеры</button></td></tr>`}).join(''):'<tr><td colspan="11" class="mut">Нет данных (ждём скан)</td></tr>';
+  $('positions').innerHTML=s.positions.length?s.positions.map(p=>{
+    const w=(p.whales?.wallets||[]).filter(x=>x.drop_pct>0).sort((a,b)=>b.drop_pct-a.drop_pct)[0];
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--line)"><div style="display:flex;justify-content:space-between"><b>${esc(p.symbol)}</b><b class="${p.pnl_pct>=0?'pos':'neg'}">${p.pnl_pct>=0?'+':''}${p.pnl_pct.toFixed(1)}%</b></div>
+    <div class="mut" style="font-size:12px">вход $${(+p.entry_price).toPrecision(4)} · сейчас $${(+p.price).toPrecision(4)} · ${dur(Date.now()/1000-p.entry_time)}<br>
+    покупки 15м: ${p.flow_15m!=null?pct(p.flow_15m):'—'} (выход ≤ ${CFG?pct(CFG.exit_buy_share_15m):''}) · киты: ${p.whales?('топ-10 −'+p.whales.top10_drop_pct+'%'+(w?`, макс ${esc(w.label)} −${w.drop_pct}%`:'')):'—'}</div>
+    <button style="margin-top:6px" onclick="post('/api/close?mint=${esc(p.mint)}').then(load)">Закрыть</button></div>`}).join(''):'нет';
+  $('closed').innerHTML=s.closed.map(c=>`<tr><td>${esc(c.symbol)}</td><td>$${(+c.entry_price).toPrecision(4)}</td><td>$${(+c.exit_price).toPrecision(4)}</td><td>${dur(c.exit_time-c.entry_time)}</td><td class="${c.pnl_pct>=0?'pos':'neg'}">${c.pnl_pct>=0?'+':''}${c.pnl_pct.toFixed(1)}% ($${c.pnl_usd.toFixed(2)})</td><td class="reasons">${esc(c.exit_reason)}</td></tr>`).join('')||'<tr><td colspan="6" class="mut">пока нет</td></tr>';
+  $('events').innerHTML=s.events.map(e=>`<div class="ev"><span class="mut">${new Date(e.t*1000).toLocaleTimeString()}</span> ${esc(e.text)}</div>`).join('')||'<span class="mut">пусто</span>';
+}
+
+async function holders(mint,sym){
+  const el=$('holders');el.style.display='block';el.innerHTML=`<h2>Холдеры ${esc(sym)}</h2><span class="mut">Проверяю on-chain (топ кошельки + кто их фондировал), ~10–30 сек…</span>`;
+  el.scrollIntoView({behavior:'smooth'});
+  const h=await post('/api/holders?mint='+mint);
+  if(h.error){el.innerHTML=`<h2>Холдеры ${esc(sym)}</h2><div class="err">${esc(h.error)}</div><div class="mut">Публичный RPC часто режет запросы — укажи свой (Helius/QuickNode, бесплатный) в настройках.</div>`;return}
+  const ok=!h.reasons.length;
+  el.innerHTML=`<h2>Холдеры ${esc(sym)} — <span class="${ok?'pos':'neg'}">${ok?'ОК':'НЕ ПРОХОДИТ'}</span></h2>
+  <div class="stats" style="margin-bottom:8px"><span>топ-1 <b>${h.top1_pct.toFixed(1)}%</b></span><span>топ-10 <b>${h.top10_pct.toFixed(1)}%</b></span><span>mint auth <b class="${h.mint_authority?'neg':'pos'}">${h.mint_authority?'есть':'нет'}</b></span><span>freeze <b class="${h.freeze_authority?'neg':'pos'}">${h.freeze_authority?'есть':'нет'}</b></span><span>кластеров <b>${h.clusters.length}</b></span></div>
+  ${h.reasons.map(r=>`<div class="err">• ${esc(r)}</div>`).join('')}
+  ${h.clusters.map(c=>`<div style="margin:6px 0"><b>${esc(c.label)}</b>: ${c.wallets.length} кошельков, ${c.pct}% supply${c.funder?` · общий источник <a target="_blank" rel="noopener" href="https://solscan.io/account/${esc(c.funder)}">${esc(c.funder.slice(0,4)+'…'+c.funder.slice(-4))}</a>`:''}</div>`).join('')}
+  <table style="margin-top:8px"><thead><tr><th>Кошелёк</th><th>Тип</th><th>% supply</th><th>Кластер</th><th>Кто фондировал</th></tr></thead><tbody>
+  ${h.holders.slice(0,20).map(x=>`<tr><td><a target="_blank" rel="noopener" href="https://solscan.io/account/${esc(x.owner)}">${esc(x.label)}</a></td><td class="${x.kind==='wallet'?'':'mut'}">${esc(x.kind)}</td><td>${x.pct.toFixed(2)}%</td><td>${esc(x.cluster||'')}</td><td class="mut">${x.funder?esc(x.funder.slice(0,4)+'…'+x.funder.slice(-4))+(x.funder_status==='partial'?' (неполная история)':''):(x.funder_status||'')}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+const CFG_KEYS=[['min_liquidity_usd','Мин. ликвидность $'],['min_age_hours','Мин. возраст, ч'],['min_volume_24h_usd','Мин. объём 24ч $'],['min_liq_to_fdv','Ликв./FDV мин'],['max_top1_holder_pct','Топ-1 кошелёк макс %'],['max_top10_holders_pct','Топ-10 макс %'],['max_cluster_pct','Кластер макс %'],['entry_buy_share_15m','Вход: покупки 15м ≥'],['entry_buy_share_5m','Вход: покупки 5м ≥'],['min_buy_usd_15m','Вход: buy $ 15м ≥'],['min_unique_buyers_15m','Вход: покупателей ≥'],['exit_buy_share_15m','Выход: покупки 15м ≤'],['stop_loss_pct','Стоп, %'],['whale_exit_drop_pct','Выход: кит продал ≥ %'],['whale_exit_top10_drop_pct','Выход: топ-10 продали ≥ %'],['position_usd','Размер позиции $'],['max_open_positions','Макс. позиций'],['cost_per_side_pct','Комиссия+слиппедж %/сторона'],['scan_interval_sec','Интервал скана, с'],['solana_rpc_url','Solana RPC URL']];
+function renderCfg(c){CFG=c;
+  $('rules').innerHTML=`<b>1. Фильтр:</b> ликвидность ≥ ${usd(c.min_liquidity_usd)}, возраст ≥ ${c.min_age_hours}ч, объём 24ч ≥ ${usd(c.min_volume_24h_usd)}, ликв./FDV ≥ ${pct(c.min_liq_to_fdv)}; on-chain: топ-1 ≤ ${c.max_top1_holder_pct}%, топ-10 ≤ ${c.max_top10_holders_pct}%, кластер ≤ ${c.max_cluster_pct}%, нет mint/freeze authority.<br>
+  <b>2. Вход:</b> доля покупок в $ за 15м ≥ ${pct(c.entry_buy_share_15m)} и за 5м ≥ ${pct(c.entry_buy_share_5m)}, buy $ ≥ ${usd(c.min_buy_usd_15m)}, покупателей ≥ ${c.min_unique_buyers_15m}, один покупатель ≤ ${pct(c.max_top_buyer_share)}.<br>
+  <b>3. Выход:</b> покупки 15м ≤ ${pct(c.exit_buy_share_15m)} (равновесие) · кит/кластер продал ≥ ${c.whale_exit_drop_pct}% · топ-10 продали ≥ ${c.whale_exit_top10_drop_pct}% · стоп ${c.stop_loss_pct}%.`;
+  $('cfg').innerHTML=CFG_KEYS.map(([k,l])=>`<label for="c_${k}">${l}</label><input id="c_${k}" value="${esc(c[k])}">`).join('');
+}
+async function saveCfg(){const b={};CFG_KEYS.forEach(([k])=>{const v=$('c_'+k).value;b[k]=k==='solana_rpc_url'?v:+v});renderCfg(await post('/api/config',b))}
+async function load(){try{render(await (await fetch('/api/state')).json())}catch(e){$('err').textContent='Сервер недоступен'}}
+fetch('/api/config').then(r=>r.json()).then(renderCfg);load();setInterval(load,5000);
+</script>
+</body>
+</html>
