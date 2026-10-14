@@ -5,6 +5,8 @@
 
 ## Запуск и проверка
 - `python3 server.py` → http://localhost:8787 (stdlib, без зависимостей); `--demo` — синтетика без сети.
+- `streamlit run streamlit_app.py` — та же логика в Streamlit (для Streamlit Cloud); `MEMESCAN_DEMO=1` — синтетика.
+- `python3 -m memescan.diag` — самопроверка на живых данных (вывод пользователь присылает в чат).
 - `python3 -m unittest -v tests.test_strategy` — прогонять перед каждым коммитом.
 - Данные: GeckoTerminal (пулы, сделки), Solana RPC (холдеры, цена и потоки из хранилищ PumpSwap каждую секунду), DexScreener (резервная цена).
 

@@ -11,6 +11,25 @@ python3 -m unittest -v tests.test_strategy
 Публичный Solana RPC часто режет `getTokenLargestAccounts`. Возьми бесплатный ключ Helius/QuickNode:
 `SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=..." python3 server.py` (или вставь его в «Настройки» в интерфейсе).
 
+## Запуск в облаке Streamlit (без своего компьютера)
+1. https://share.streamlit.io → войти через GitHub → **Create app** → репозиторий `withrandir1/Dragon`, ветка `claude/gallant-gauss-ykq11q`, файл `streamlit_app.py`.
+2. В **Advanced settings → Secrets** (необязательно, но публичный RPC быстро упирается в лимиты):
+   ```toml
+   SOLANA_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ТВОЙ_КЛЮЧ"
+   ```
+3. **Deploy**. Внизу страницы есть кнопка «Самопроверка на живых данных»: запусти её и пришли вывод.
+
+Ограничения Streamlit Community Cloud:
+- приложение засыпает, если его долго никто не открывает;
+- после перезапуска журнал и таблица проверки начинаются заново.
+
+Для долгого сбора статистики надёжнее локальный `server.py` или постоянный сервер.
+
+Локально: `pip install -r requirements.txt && streamlit run streamlit_app.py`; добавь `MEMESCAN_DEMO=1` для синтетических данных.
+
+## Самопроверка из терминала
+`python3 -m memescan.diag`. Проверяет на живых данных: пулы PumpSwap в GeckoTerminal, чтение хранилищ пула (цена из блокчейна против цены GeckoTerminal), создателя, холдеров, посекундную цену и поток.
+
 ## Стратегия (вся)
 1. **Только pump.fun.** По умолчанию берём монеты, уже мигрировавшие на PumpSwap: на bonding curve пул слишком тонкий, его кладёт одна транзакция (включается в настройках).
    Анти-скам: ликвидность ≥ $50K, монета старше 24ч, объём за 24ч ≥ $200K. On-chain: у создателя ≤ 10%, крупнейший кошелёк ≤ 10%, топ-10 ≤ 35%, кластер ≤ 15%, нет mint/freeze authority.
