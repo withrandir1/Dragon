@@ -327,6 +327,23 @@ class TestTickerRoutes(unittest.TestCase):
         self.assertEqual(t.velocity(MINT)["status"], "DexScreener не знает пул")
 
 
+class TestLiveFlow(unittest.TestCase):
+    def test_vault_deltas_to_buys_and_sells(self):
+        from memescan.ticker import PriceTicker
+        t = PriceTicker(FakeRPC(), dex=FakeDex())
+        t.set_watch({MINT: "p"})
+        t._flow(MINT, 0, 1000, 100)            # baseline
+        t._flow(MINT, 1, 990, 102)             # tokens out, SOL in -> buy 2
+        t._flow(MINT, 2, 995, 101)             # tokens in, SOL out -> sell 1
+        t._flow(MINT, 3, 1100, 111)            # both up -> liquidity add, ignored
+        f = t.live_flow(MINT, now=3)
+        self.assertAlmostEqual(f["1m"]["buy_q"], 2)
+        self.assertAlmostEqual(f["1m"]["sell_q"], 1)
+        self.assertAlmostEqual(f["1m"]["ratio"], 2.0)
+        self.assertFalse(f["5m"]["covered"])
+        self.assertTrue(t.live_flow(MINT, now=301)["5m"]["covered"])
+
+
 class TestMomentumAndLive(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -380,6 +397,39 @@ class TestMomentumAndLive(unittest.TestCase):
         self.e.on_tick()
         self.assertNotIn(MINT, self.e.positions)
         self.assertIn("создатель", self.e.closed[-1]["exit_reason"])
+
+    def drive(self, seconds, buy_step, t0):
+        """Simulate trades through the pool: buys push SOL in / tokens out."""
+        for i in range(seconds):
+            self.rpc.balances["ta_vq_pMEME"] *= buy_step
+            self.rpc.balances["ta_vb_pMEME"] /= buy_step
+            self.e.ticker.tick(now=t0 + i)
+
+    def test_realtime_entry_without_scan(self):
+        self.g.trades_by_pool["pMEME"] = trades(1000, 30, 1000, 30)   # GeckoTerminal: balanced, no entry
+        self.e.scan_once()
+        self.assertEqual(self.e.positions, {})
+        self.e.get_holders(MINT)                                     # holders cached
+        self.e.cfg.min_buy_usd_15m = 1_000                           # tiny fake pool
+        self.drive(905, 1.0005, time.time() - 905)                   # 15 min of steady on-chain buying
+        self.e._realtime_entries()
+        self.assertIn(MINT, self.e.positions)
+
+    def test_realtime_flow_exit(self):
+        t0 = time.time() - 40
+        self.e.ticker.set_watch({MINT: "pMEME"})
+        self.drive(35, 1.001, t0)
+        self.e.scan_once()
+        self.assertIn(MINT, self.e.positions)
+        # 15 min of mostly selling on-chain -> live 15m ratio < x2 -> exit without waiting for a scan
+        for i in range(36, 960):
+            step = 1.001 if i % 3 == 0 else 0.9995
+            self.rpc.balances["ta_vq_pMEME"] *= step
+            self.rpc.balances["ta_vb_pMEME"] /= step
+            self.e.ticker.tick(now=t0 + i)
+        self.e._realtime_flow_exits(now=t0 + 960)
+        self.assertNotIn(MINT, self.e.positions)
+        self.assertIn("on-chain", self.e.closed[-1]["exit_reason"])
 
     def test_live_stop_every_second(self):
         t0 = time.time() - 80

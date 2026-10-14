@@ -37,6 +37,8 @@ class Engine:
         self.ticker.on_tick = self.on_tick
         self.research = Research(os.path.join(DATA_DIR, "research.jsonl"))
         self._wake = threading.Event()
+        self._universe = (0.0, [])
+        self._holders_busy = set()
         self._load()
 
     # ---------- persistence ----------
@@ -84,7 +86,9 @@ class Engine:
         cfg = self.cfg
         now = time.time()
         dexes = ["pumpswap"] + (["pump-fun"] if cfg.include_bonding_curve else []) if cfg.pump_only else []
-        raw = self.gecko.universe(cfg.universe_pages, dexes)
+        if now - self._universe[0] >= cfg.universe_refresh_sec or not self._universe[1]:
+            self._universe = (now, self.gecko.universe(cfg.universe_pages, dexes))
+        raw = self._universe[1]
         pools = S.dedupe_by_token([S.normalize_pool(p, now) for p in raw])
         for p in pools:
             p["filter_reasons"] = S.pool_filter(p, cfg)
@@ -105,7 +109,8 @@ class Engine:
 
         for p in analyze.values():
             try:
-                p["flow"] = S.flow_metrics(self.gecko.trades(p["pool"]), time.time())
+                p["flow_gecko"] = S.flow_metrics(self.gecko.trades(p["pool"]), time.time())
+                p["flow"] = self.merged_flow(p)
                 p["entry_missing"] = S.entry_check(p["flow"], cfg)
             except SourceError as e:
                 p["flow"], p["entry_missing"] = None, [str(e)]
@@ -155,6 +160,81 @@ class Engine:
             self.last_scan = time.time()
             self.last_error = None
         self._save()
+
+    # ---------- live flow ----------
+    def merged_flow(self, p):
+        """GeckoTerminal flow, with 5m/15m ratio replaced by on-chain per-second flow once the coin
+        has been watched long enough. Buyer counts / top-buyer share stay from GeckoTerminal."""
+        g = p.get("flow_gecko")
+        if not g:
+            return None
+        live = self.ticker.live_flow(p["mint"])
+        price_q = self.ticker.price(p["mint"])
+        q_usd = p["price_usd"] / price_q if price_q and p.get("price_usd") else None
+        out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in g.items()}
+        for w in ("5m", "15m"):
+            out[w]["src"] = "gecko"
+            if live and live[w]["covered"]:
+                lw = live[w]
+                out[w].update(ratio=lw["ratio"], buy_share=lw["buy_share"], src="live")
+                if q_usd:
+                    out[w].update(buy_usd=round(lw["buy_q"] * q_usd, 2), sell_usd=round(lw["sell_q"] * q_usd, 2))
+        if live:
+            out["1m_live"] = live["1m"]
+        return out
+
+    def _holders_async(self, mint):
+        if mint in self._holders_busy:
+            return
+        self._holders_busy.add(mint)
+
+        def run():
+            try:
+                self.get_holders(mint)
+            finally:
+                self._holders_busy.discard(mint)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _realtime_entries(self):
+        """Every second: a watched coin whose live flow now passes -> enter without waiting for a scan."""
+        cfg = self.cfg
+        if not cfg.auto_paper_trade:
+            return
+        for p in list(self.rows):
+            m = p["mint"]
+            if m in self.positions or m in self.pending or p.get("filter_reasons") or not p.get("flow_gecko"):
+                continue
+            if len(self.positions) >= cfg.max_open_positions:
+                return
+            flow = self.merged_flow(p)
+            if flow["15m"].get("src") != "live" and flow["5m"].get("src") != "live":
+                continue  # nothing new since the scan already judged this coin
+            p["flow"] = flow
+            if S.entry_check(flow, cfg):
+                continue
+            p["econ"] = E.entry_economics(p, self.research, cfg)
+            bad = E.reason(p["econ"], cfg)
+            if bad and not (p["econ"]["verdict"] == "no_stats" and cfg.trade_without_stats):
+                continue
+            cached = self.holders.get(m)
+            if not cached or time.time() - cached[0] > HOLDERS_TTL:
+                self._holders_async(m)
+                continue
+            h = cached[1]
+            if h["reasons"]:
+                p["signal"], p["holder_reasons"] = "rejected", h["reasons"]
+                continue
+            if self.momentum(self.ticker.velocity(m)) or not cfg.entry_require_momentum:
+                self._open(p, h)
+                p["signal"] = "holding"
+
+    def _realtime_flow_exits(self, now=None):
+        for mint, pos in list(self.positions.items()):
+            live = self.ticker.live_flow(mint, now)
+            if live and live["15m"]["covered"]:
+                pos["ratio_15m"] = live["15m"]["ratio"]
+                if live["15m"]["ratio"] < self.cfg.exit_ratio_15m:
+                    self.close(mint, f"перевес ушёл (on-chain): ×{live['15m']['ratio']:.1f}")
 
     # ---------- momentum gate + live price ----------
     @staticmethod
@@ -215,6 +295,8 @@ class Engine:
             reason = S.exit_check(pos, None, pos["price"], whales, self.cfg)
             if reason:
                 self.close(mint, reason)
+        self._realtime_flow_exits()
+        self._realtime_entries()
 
     def live(self):
         with self.lock:

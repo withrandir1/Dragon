@@ -22,6 +22,8 @@ USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WINDOWS = (1, 15, 30)
 WEIGHTS = {1: 0.2, 15: 0.4, 30: 0.4}
 HISTORY_SEC = 65
+FLOW_HISTORY_SEC = 16 * 60
+FLOW_WINDOWS = {"1m": 60, "5m": 300, "15m": 900}
 TREND_EPS = 0.002     # %/s dead-band so noise doesn't flip accel/decel
 
 
@@ -78,6 +80,9 @@ class PriceTicker:
         self.route = {}       # pool -> ("chain", base_vault, quote_vault) | ("dexscreener",)
         self.status = {}      # mint -> human-readable state shown in the UI
         self.samples = {}     # mint -> deque[(t, price)]
+        self.flows = {}       # mint -> deque[(t, buy_quote, sell_quote)] from vault deltas
+        self.last_vault = {}  # mint -> (base, quote) balances at previous tick
+        self.since = {}       # mint -> when on-chain flow tracking started
         self.last_error = None
         self._last_dex = 0.0
         self.extra = []       # token accounts to read every tick (whales of open positions)
@@ -88,9 +93,10 @@ class PriceTicker:
     def set_watch(self, mapping):
         with self.lock:
             self.watch = dict(mapping)
-            for m in list(self.samples):
-                if m not in self.watch:
-                    del self.samples[m]
+            for d in (self.samples, self.flows, self.last_vault, self.since):
+                for m in list(d):
+                    if m not in self.watch:
+                        del d[m]
             for m in mapping:
                 self.status.setdefault(m, "ищу пул…")
 
@@ -130,6 +136,41 @@ class PriceTicker:
             dq.popleft()
         self.status[mint] = src
 
+    def _flow(self, mint, now, base, quote):
+        """Vault deltas between ticks: tokens out + quote in = buy, tokens in + quote out = sell.
+        Both sides moving the same way = liquidity add/remove -> ignored. Net per tick, so
+        offsetting trades inside one second cancel (ratio stays honest, totals understate)."""
+        prev = self.last_vault.get(mint)
+        self.last_vault[mint] = (base, quote)
+        if prev is None:
+            self.since[mint] = now
+            return
+        db, dq = base - prev[0], quote - prev[1]
+        buy = dq if (dq > 0 and db < 0) else 0.0
+        sell = -dq if (dq < 0 and db > 0) else 0.0
+        fl = self.flows.setdefault(mint, deque())
+        if buy or sell:
+            fl.append((now, buy, sell))
+        while fl and now - fl[0][0] > FLOW_HISTORY_SEC:
+            fl.popleft()
+
+    def live_flow(self, mint, now=None):
+        """{window: {buy_q, sell_q, ratio, covered}} in quote units (SOL); covered = watched long enough."""
+        now = now or time.time()
+        with self.lock:
+            since = self.since.get(mint)
+            fl = list(self.flows.get(mint, ()))
+        if since is None:
+            return None
+        out = {}
+        for name, w in FLOW_WINDOWS.items():
+            b = sum(x[1] for x in fl if now - x[0] <= w)
+            sl = sum(x[2] for x in fl if now - x[0] <= w)
+            ratio = min(b / sl, 99.0) if sl else (99.0 if b else 1.0)
+            out[name] = {"buy_q": b, "sell_q": sl, "ratio": ratio,
+                         "buy_share": b / (b + sl) if (b + sl) else 0.5, "covered": now - since >= w}
+        return out
+
     def tick(self, now=None):
         with self.lock:
             watch = dict(self.watch)
@@ -159,6 +200,7 @@ class PriceTicker:
                     for mint, (_, bv, qv) in chain:
                         if bal.get(bv):
                             self._add(mint, now, bal[qv] / bal[bv], "chain")
+                            self._flow(mint, now, bal[bv], bal.get(qv, 0.0))
                         else:
                             self.status[mint] = "пустое хранилище пула"
             except SourceError as e:

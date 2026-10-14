@@ -58,7 +58,8 @@ class Config:
     max_open_positions: int = 3
 
     # --- Runtime ---
-    scan_interval_sec: int = 90
+    scan_interval_sec: int = 20             # pause between scans (trades of top coins, GeckoTerminal)
+    universe_refresh_sec: int = 300         # coin list refresh (heavier, changes slowly)
     tick_interval_sec: float = 1.0          # on-chain price ticker (growth speed 1s/15s/30s)
     trades_fetch_top_n: int = 10            # pools that get trade-level analysis per scan
     universe_pages: int = 3
