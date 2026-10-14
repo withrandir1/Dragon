@@ -142,7 +142,7 @@ class TestEngine(unittest.TestCase):
         self.g.pools = [pool("pMEME", MINT, "MEME", price=0.01), pool("pNEW", NEW, "NEW", age_h=3)]
         self.g.trades_by_pool = {"pMEME": trades(1000, 40, 500, 20), "pNEW": trades(5000, 100, 10, 1)}
         self.rpc = FakeRPC(holders=clean_holders(), creator=CREATOR, creator_amount=5_000_000)
-        self.e = eng.Engine(Config(), gecko=self.g, rpc=self.rpc)
+        self.e = eng.Engine(Config(entry_require_momentum=False), gecko=self.g, rpc=self.rpc)
 
     def tearDown(self):
         config_mod.DATA_DIR, self.eng_mod.DATA_DIR = self._old
@@ -199,6 +199,80 @@ class TestEngine(unittest.TestCase):
         self.e.scan_once()
         e2 = self.eng_mod.Engine(Config(), gecko=self.g, rpc=self.rpc)
         self.assertIn(MINT, e2.positions)
+
+
+class TestVelocity(unittest.TestCase):
+    def test_windows_and_trend(self):
+        from memescan.ticker import velocity
+        steady = velocity([(t, 1.001 ** t) for t in range(40)], 39)
+        self.assertAlmostEqual(steady["v1"], 0.1, places=2)
+        self.assertAlmostEqual(steady["v30"], (1.001 ** 30 - 1) * 100, places=2)
+        self.assertEqual(steady["trend"], "flat")
+        self.assertAlmostEqual(steady["inertia"], 60 * 100 * 0.0009995, places=1)  # ~6%/min
+        accel = velocity([(t, 1.0 if t < 25 else 1.002 ** (t - 25)) for t in range(40)], 39)
+        self.assertEqual(accel["trend"], "accel")
+        stall = velocity([(t, 1.003 ** min(t, 30)) for t in range(40)], 39)
+        self.assertEqual(stall["trend"], "decel")
+        self.assertEqual(stall["v1"], 0.0)
+
+    def test_not_enough_history(self):
+        from memescan.ticker import velocity
+        v = velocity([(t, 1.0) for t in range(10)], 9)
+        self.assertIsNone(v["v15"])
+        self.assertIsNone(v["v30"])
+        self.assertEqual(v["v1"], 0.0)
+
+
+class TestMomentumAndLive(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import memescan.engine as eng
+        self._old = (config_mod.DATA_DIR, eng.DATA_DIR)
+        config_mod.DATA_DIR = eng.DATA_DIR = self.tmp
+        self.eng_mod = eng
+        self.g = FakeGecko()
+        self.g.pools = [pool("pMEME", MINT, "MEME", price=0.01)]
+        self.g.trades_by_pool = {"pMEME": trades(1000, 40, 500, 20)}
+        self.rpc = FakeRPC(holders=clean_holders(), creator=CREATOR, creator_amount=5_000_000)
+        self.rpc.add_pool("pMEME", MINT, base=1_000_000, quote=100.0)
+        self.e = eng.Engine(Config(), gecko=self.g, rpc=self.rpc)
+
+    def tearDown(self):
+        config_mod.DATA_DIR, self.eng_mod.DATA_DIR = self._old
+
+    def feed(self, seconds, step, t0):
+        for i in range(seconds):
+            self.rpc.balances["ta_vq_pMEME"] *= step
+            self.e.ticker.tick(now=t0 + i)
+
+    def test_waits_for_live_momentum_then_enters(self):
+        self.e.scan_once()
+        self.assertEqual(self.e.rows[0]["signal"], "pending")
+        self.assertEqual(self.e.positions, {})
+        t0 = time.time() - 40
+        self.feed(35, 1.001, t0)          # price rising ~0.1%/s
+        self.e.on_tick()
+        self.assertIn(MINT, self.e.positions)
+
+    def test_falling_price_blocks_entry(self):
+        t0 = time.time() - 40
+        self.e.ticker.set_watch({MINT: "pMEME"})
+        self.feed(35, 0.999, t0)          # falling
+        self.e.scan_once()
+        self.assertEqual(self.e.positions, {})
+        self.assertIn("не растёт", self.e.rows[0]["holder_reasons"][0])
+
+    def test_live_stop_every_second(self):
+        t0 = time.time() - 80
+        self.e.ticker.set_watch({MINT: "pMEME"})
+        self.feed(35, 1.001, t0)
+        self.e.scan_once()
+        self.assertIn(MINT, self.e.positions)
+        self.rpc.balances["ta_vq_pMEME"] *= 0.8    # -20% dump within a second
+        self.e.ticker.tick(now=t0 + 36)
+        self.e.on_tick()
+        self.assertNotIn(MINT, self.e.positions)
+        self.assertIn("стоп", self.e.closed[-1]["exit_reason"])
 
 
 if __name__ == "__main__":

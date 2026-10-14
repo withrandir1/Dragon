@@ -34,6 +34,7 @@ class Config:
     min_buy_usd_15m: float = 10_000
     min_unique_buyers_15m: int = 25         # not a single wallet painting the tape
     max_top_buyer_share: float = 0.30       # biggest buyer's share of buy volume
+    entry_require_momentum: bool = True     # live price rising over both 15s and 30s at entry
 
     # --- 4. Exit (whatever comes first) ---
     exit_ratio_15m: float = 2.0             # hold while buy$ >= 2x sell$; below -> out
@@ -49,6 +50,7 @@ class Config:
 
     # --- Runtime ---
     scan_interval_sec: int = 90
+    tick_interval_sec: float = 1.0          # on-chain price ticker (growth speed 1s/15s/30s)
     trades_fetch_top_n: int = 10            # pools that get trade-level analysis per scan
     universe_pages: int = 3
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"

@@ -65,6 +65,7 @@ class FakeRPC:
         self.freeze_authority = freeze_authority
         self.balances = {f"ta_{o}": amt for o, amt, _, _ in holders}
         self.creator = creator
+        self.pool_vaults = {}   # (pool, mint) -> token account
         if creator and f"ta_{creator}" not in self.balances:
             self.balances[f"ta_{creator}"] = creator_amount
         self.calls = 0
@@ -97,7 +98,16 @@ class FakeRPC:
         from memescan.solana_util import b58decode
         return bytes(8 + 40) + b"\x01" + b58decode(self.creator)
 
+    def add_pool(self, pool, mint, base, quote, quote_mint="So11111111111111111111111111111111111111112"):
+        for kind, m, amt in (("vb", mint, base), ("vq", quote_mint, quote)):
+            addr = f"ta_{kind}_{pool}"
+            self.pool_vaults[(pool, m)] = addr
+            self.balances[addr] = amt
+
     def token_accounts_by_owner(self, owner, mint):
+        if (owner, mint) in self.pool_vaults:
+            a = self.pool_vaults[(owner, mint)]
+            return [(a, self.balances[a])]
         a = f"ta_{owner}"
         return [(a, self.balances[a])] if a in self.balances else []
 

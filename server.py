@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import threading
+import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -34,6 +35,18 @@ def make_engine():
     rpc = FakeRPC(holders=[("LPvault", 300_000_000, False, None)] +
                   [(f"wallet{i}abcdefghijk", 20_000_000 - i * 1_000_000, True, "devfunder" if i < 2 else f"f{i}")
                    for i in range(12)], creator=b58encode(b"\x07" * 32), creator_amount=4_000_000)
+    import random
+    for i, n in enumerate(names):
+        mint = g.pools[i]["relationships"]["base_token"]["data"]["id"].split("_", 1)[1]
+        rpc.add_pool(f"pool{n}", mint, base=1_000_000_000, quote=500 * (i + 1))
+
+    def walk():  # synthetic price moves: early coins trend up, later ones chop
+        while True:
+            for i, n in enumerate(names):
+                k = f"ta_vq_pool{n}"
+                rpc.balances[k] *= 1 + random.gauss(0.0006 - 0.0001 * i, 0.0015)
+            time.sleep(0.5)
+    threading.Thread(target=walk, daemon=True).start()
     return Engine(Config(scan_interval_sec=15), gecko=g, rpc=rpc)
 
 
@@ -71,6 +84,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, ENGINE.state_json())
         if u.path == "/api/config":
             return self._json(masked_config())
+        if u.path == "/api/live":
+            return self._json(ENGINE.live())
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -94,6 +109,7 @@ class Handler(BaseHTTPRequestHandler):
             ENGINE.cfg.update(body)
             ENGINE.cfg.save()
             ENGINE.rpc.url = ENGINE.cfg.solana_rpc_url
+            ENGINE.ticker.interval = ENGINE.cfg.tick_interval_sec
             return self._json(masked_config())
         self._json({"error": "not found"}, 404)
 
@@ -102,6 +118,7 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     port = int(os.environ.get("PORT", args[0] if args else 8787))
     threading.Thread(target=ENGINE.run_forever, daemon=True).start()
+    threading.Thread(target=ENGINE.ticker.run_forever, daemon=True).start()
     print(f"memescan (PAPER{' DEMO' if '--demo' in sys.argv else ''}) -> http://localhost:{port}")
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 

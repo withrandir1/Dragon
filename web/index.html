@@ -30,6 +30,7 @@ a{color:var(--acc);text-decoration:none}
 .err{color:var(--sell);font-size:13px}
 .reasons{font-size:12px;color:var(--mut);white-space:normal;text-align:left}
 .ev{font-size:13px;padding:5px 0;border-bottom:1px solid var(--line)}
+.vel{font-size:12px;line-height:1.3}.vrow{display:flex;gap:6px;justify-content:flex-end}.inert{font-weight:700;font-size:13px}.pending{background:#2f2a10;color:var(--warn)}
 #holders{display:none}
 .cfg{display:grid;grid-template-columns:1fr 110px;gap:6px 8px;font-size:12px}.cfg input{width:100%;background:#0d0f14;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 5px}
 details summary{cursor:pointer;color:var(--mut)}
@@ -46,8 +47,8 @@ details summary{cursor:pointer;color:var(--mut)}
 <div>
   <section>
     <h2>Топ-10 pump.fun по перевесу покупок (прошли анти-скам фильтр)</h2>
-    <table><thead><tr><th>Монета</th><th>Возраст</th><th>Ликвидность</th><th>FDV</th><th>Объём 24ч</th><th>Покуп./Прод. $ 5м</th><th>Покуп./Прод. $ 15м</th><th>Buy $ 15м</th><th>Кошельки</th><th>Сигнал</th><th></th></tr></thead>
-    <tbody id="rows"><tr><td colspan="11" class="mut">Первый скан идёт ~30–60 сек…</td></tr></tbody></table>
+    <table><thead><tr><th>Монета</th><th>Возраст</th><th>Ликвидность</th><th>FDV</th><th>Объём 24ч</th><th>Покуп./Прод. $ 5м</th><th>Покуп./Прод. $ 15м</th><th title="Изменение цены за 1с / 15с / 30с (on-chain, каждую секунду) и инерция — взвешенная скорость, %/мин">Скорость 1с·15с·30с</th><th>Buy $ 15м</th><th>Кошельки</th><th>Сигнал</th><th></th></tr></thead>
+    <tbody id="rows"><tr><td colspan="12" class="mut">Первый скан идёт ~30–60 сек…</td></tr></tbody></table>
   </section>
   <section id="holders"></section>
   <section>
@@ -72,7 +73,22 @@ const dur=s=>s<3600?Math.round(s/60)+'м':(s/3600).toFixed(1)+'ч';
 const rx=r=>r>=99?'×∞':'×'+r.toFixed(1);
 // green part = buy share of $ volume; white tick = hold line (×2 => 66.7%)
 const bar=f=>{const t=CFG?.exit_ratio_15m??2;return `<span class="bar${f.ratio>=t?' hot':''}"><i style="width:${(f.buy_share*100).toFixed(0)}%"></i><b style="left:${(100*t/(1+t)).toFixed(1)}%"></b><span>${rx(f.ratio)}</span></span>`};
-const SIG={entry:'ВХОД',holding:'В позиции',rejected:'Отсев',watch:'наблюдаем'};
+const SIG={entry:'ВХОД',holding:'В позиции',rejected:'Отсев',watch:'наблюдаем',pending:'ждём скорость'};
+let LIVE={};
+const sp=(v,d=2)=>v==null?'<span class="mut">·</span>':`<span class="${v>0?'pos':v<0?'neg':'mut'}">${v>0?'+':''}${v.toFixed(d)}%</span>`;
+const TR={accel:'<span class="pos" title="ускоряется">⇡</span>',decel:'<span class="neg" title="замедляется">⇣</span>',flat:'<span class="mut" title="ровно">→</span>'};
+function velHtml(v){
+  if(!v)return '<span class="mut">нет live-цены</span>';
+  const i=v.inertia;
+  return `<div class="vrow">${sp(v.v1,2)} ${sp(v.v15,1)} ${sp(v.v30,1)}</div><div class="inert ${i>0?'pos':i<0?'neg':'mut'}">${i==null?'копим 30с…':(i>0?'+':'')+i.toFixed(1)+'%/мин'} ${TR[v.trend]||''}</div>`;
+}
+function applyLive(l){
+  LIVE=l||{};
+  for(const [m,v] of Object.entries(LIVE.velocity||{})){const el=document.getElementById('v_'+m);if(el)el.innerHTML=velHtml(v);const pe=document.getElementById('pv_'+m);if(pe)pe.innerHTML=velHtml(v)}
+  for(const [m,p] of Object.entries(LIVE.positions||{})){const el=document.getElementById('pnl_'+m);if(el){el.className=p.pnl_pct>=0?'pos':'neg';el.textContent=(p.pnl_pct>=0?'+':'')+p.pnl_pct.toFixed(1)+'%'}}
+  if(LIVE.ticker_error)$('err').textContent='Тикер: '+LIVE.ticker_error;
+}
+async function loadLive(){try{applyLive(await (await fetch('/api/live')).json())}catch(e){}}
 async function post(u,body){const r=await fetch(u,{method:'POST',body:body?JSON.stringify(body):undefined});return r.json()}
 let CFG=null;
 
@@ -85,13 +101,14 @@ function render(s){
     const f=p.flow, why=[...(p.entry_missing||[]),...(p.holder_reasons||[])];
     return `<tr><td><a href="https://dexscreener.com/solana/${esc(p.pool)}" target="_blank" rel="noopener"><b>${esc(p.symbol)}</b></a><div class="mut" style="font-size:11px">${esc(p.dex)}</div></td>
     <td>${p.age_hours>48?(p.age_hours/24).toFixed(0)+'д':Math.round(p.age_hours)+'ч'}</td><td>${usd(p.liquidity_usd)}</td><td>${usd(p.fdv_usd)}</td><td>${usd(p.volume_24h)}</td>
-    <td>${bar(f['5m'])}</td><td>${bar(f['15m'])}</td><td>${usd(f['15m'].buy_usd)}</td><td>${f['15m'].buyers}/${f['15m'].sellers}</td>
+    <td>${bar(f['5m'])}</td><td>${bar(f['15m'])}</td><td class="vel" id="v_${esc(p.mint)}">${velHtml(LIVE.velocity?.[p.mint])}</td><td>${usd(f['15m'].buy_usd)}</td><td>${f['15m'].buyers}/${f['15m'].sellers}</td>
     <td title="${esc(why.join('\n'))}"><span class="badge ${p.signal}">${SIG[p.signal]}</span>${why.length&&p.signal!=='holding'?`<div class="reasons">${esc(why[0])}</div>`:''}</td>
-    <td><button onclick="holders('${esc(p.mint)}','${esc(p.symbol)}')">Холдеры</button></td></tr>`}).join(''):'<tr><td colspan="11" class="mut">Нет данных (ждём скан)</td></tr>';
+    <td><button onclick="holders('${esc(p.mint)}','${esc(p.symbol)}')">Холдеры</button></td></tr>`}).join(''):'<tr><td colspan="12" class="mut">Нет данных (ждём скан)</td></tr>';
   $('positions').innerHTML=s.positions.length?s.positions.map(p=>{
     const ws=p.whales?.wallets||[], cr=ws.find(x=>x.role==='creator'), t3=ws.filter(x=>x.role==='top3');
     const drop=x=>x.drop_pct>0?`<span class="neg">−${x.drop_pct}%</span>`:'держит';
-    return `<div style="padding:8px 0;border-bottom:1px solid var(--line)"><div style="display:flex;justify-content:space-between"><b>${esc(p.symbol)}</b><b class="${p.pnl_pct>=0?'pos':'neg'}">${p.pnl_pct>=0?'+':''}${p.pnl_pct.toFixed(1)}%</b></div>
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--line)"><div style="display:flex;justify-content:space-between"><b>${esc(p.symbol)}</b><b id="pnl_${esc(p.mint)}" class="${p.pnl_pct>=0?'pos':'neg'}">${p.pnl_pct>=0?'+':''}${p.pnl_pct.toFixed(1)}%</b></div>
+    <div id="pv_${esc(p.mint)}" class="vel" style="text-align:left;margin:4px 0">${velHtml(LIVE.velocity?.[p.mint])}</div>
     <div class="mut" style="font-size:12px">вход $${(+p.entry_price).toPrecision(4)} · сейчас $${(+p.price).toPrecision(4)} · ${dur(Date.now()/1000-p.entry_time)}<br>
     покупки/продажи 15м: <b>${p.ratio_15m!=null?rx(p.ratio_15m):'—'}</b> (выход < ×${CFG?.exit_ratio_15m??2})<br>
     создатель: ${cr?(cr.was>0?drop(cr):'уже вышел до входа'):'не определён'}<br>
@@ -116,16 +133,16 @@ async function holders(mint,sym){
   </tbody></table>`;
 }
 
-const CFG_KEYS=[['min_liquidity_usd','Мин. ликвидность $'],['min_age_hours','Мин. возраст, ч'],['min_volume_24h_usd','Мин. объём 24ч $'],['min_liq_to_fdv','Ликв./FDV мин'],['include_bonding_curve','Брать bonding curve (1/0)'],['max_top1_holder_pct','Топ-1 кошелёк макс %'],['max_top10_holders_pct','Топ-10 макс %'],['max_cluster_pct','Кластер макс %'],['max_creator_pct','Создатель макс %'],['entry_ratio_15m','Вход: покуп/прод 15м ≥ ×'],['entry_ratio_5m','Вход: покуп/прод 5м ≥ ×'],['min_buy_usd_15m','Вход: buy $ 15м ≥'],['min_unique_buyers_15m','Вход: покупателей ≥'],['exit_ratio_15m','Держим пока 15м ≥ ×'],['creator_exit_drop_pct','Выход: создатель продал ≥ %'],['top3_exit_drop_pct','Выход: топ-3 продал ≥ %'],['cluster_exit_drop_pct','Выход: кластер продал ≥ %'],['stop_loss_pct','Стоп, %'],['position_usd','Размер позиции $'],['max_open_positions','Макс. позиций'],['cost_per_side_pct','Комиссия+слиппедж %/сторона'],['scan_interval_sec','Интервал скана, с'],['solana_rpc_url','Solana RPC URL']];
+const CFG_KEYS=[['min_liquidity_usd','Мин. ликвидность $'],['min_age_hours','Мин. возраст, ч'],['min_volume_24h_usd','Мин. объём 24ч $'],['min_liq_to_fdv','Ликв./FDV мин'],['include_bonding_curve','Брать bonding curve (1/0)'],['max_top1_holder_pct','Топ-1 кошелёк макс %'],['max_top10_holders_pct','Топ-10 макс %'],['max_cluster_pct','Кластер макс %'],['max_creator_pct','Создатель макс %'],['entry_ratio_15m','Вход: покуп/прод 15м ≥ ×'],['entry_ratio_5m','Вход: покуп/прод 5м ≥ ×'],['min_buy_usd_15m','Вход: buy $ 15м ≥'],['min_unique_buyers_15m','Вход: покупателей ≥'],['entry_require_momentum','Вход только если цена растёт 15с и 30с (1/0)'],['exit_ratio_15m','Держим пока 15м ≥ ×'],['creator_exit_drop_pct','Выход: создатель продал ≥ %'],['top3_exit_drop_pct','Выход: топ-3 продал ≥ %'],['cluster_exit_drop_pct','Выход: кластер продал ≥ %'],['stop_loss_pct','Стоп, %'],['position_usd','Размер позиции $'],['max_open_positions','Макс. позиций'],['cost_per_side_pct','Комиссия+слиппедж %/сторона'],['scan_interval_sec','Интервал скана, с'],['solana_rpc_url','Solana RPC URL']];
 function renderCfg(c){CFG=c;
   $('rules').innerHTML=`<b>1. Фильтр:</b> только pump.fun${c.include_bonding_curve?'':' (мигрировавшие, без bonding curve)'}, ликвидность ≥ ${usd(c.min_liquidity_usd)}, возраст ≥ ${c.min_age_hours}ч, объём 24ч ≥ ${usd(c.min_volume_24h_usd)}; on-chain: создатель ≤ ${c.max_creator_pct}%, топ-1 ≤ ${c.max_top1_holder_pct}%, топ-10 ≤ ${c.max_top10_holders_pct}%, кластер ≤ ${c.max_cluster_pct}%, нет mint/freeze authority.<br>
-  <b>2. Вход:</b> покупки в $ ≥ ×${c.entry_ratio_15m} продаж за 15м и ≥ ×${c.entry_ratio_5m} за 5м, buy $ ≥ ${usd(c.min_buy_usd_15m)}, покупателей ≥ ${c.min_unique_buyers_15m}.<br>
-  <b>3. Держим</b>, пока покупки ≥ ×${c.exit_ratio_15m} продаж (15м).<br><b>Выход раньше</b>, если: создатель продал ≥ ${c.creator_exit_drop_pct}% · любой из топ-3 продал ≥ ${c.top3_exit_drop_pct}% · кластер продал ≥ ${c.cluster_exit_drop_pct}% · стоп ${c.stop_loss_pct}%.`;
+  <b>2. Вход:</b> покупки в $ ≥ ×${c.entry_ratio_15m} продаж за 15м и ≥ ×${c.entry_ratio_5m} за 5м, buy $ ≥ ${usd(c.min_buy_usd_15m)}, покупателей ≥ ${c.min_unique_buyers_15m}${c.entry_require_momentum?', и цена растёт за 15с и 30с (live)':''}.<br>
+  <b>3. Держим</b>, пока покупки ≥ ×${c.exit_ratio_15m} продаж (15м).<br><b>Выход раньше</b>, если: создатель продал ≥ ${c.creator_exit_drop_pct}% · любой из топ-3 продал ≥ ${c.top3_exit_drop_pct}% · кластер продал ≥ ${c.cluster_exit_drop_pct}% · стоп ${c.stop_loss_pct}% (проверяется каждую секунду по live-цене).<br><b>Скорость:</b> изменение цены за 1с/15с/30с из резервов пула, инерция = взвешенная скорость (20/40/40) в %/мин, ⇡ ускоряется, ⇣ замедляется.`;
   $('cfg').innerHTML=CFG_KEYS.map(([k,l])=>`<label for="c_${k}">${l}</label><input id="c_${k}" value="${esc(typeof c[k]==='boolean'?+c[k]:c[k])}">`).join('');
 }
 async function saveCfg(){const b={};CFG_KEYS.forEach(([k])=>{const v=$('c_'+k).value;b[k]=k==='solana_rpc_url'?v:+v});renderCfg(await post('/api/config',b))}
 async function load(){try{render(await (await fetch('/api/state')).json())}catch(e){$('err').textContent='Сервер недоступен'}}
-fetch('/api/config').then(r=>r.json()).then(renderCfg);load();setInterval(load,5000);
+fetch('/api/config').then(r=>r.json()).then(renderCfg);load();setInterval(load,5000);loadLive();setInterval(loadLive,1000);
 </script>
 </body>
 </html>
