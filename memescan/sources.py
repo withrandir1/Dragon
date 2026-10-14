@@ -56,14 +56,26 @@ class Gecko:
                     continue
                 raise
 
-    def universe(self, pages=3):
-        """Trending pools + top pools by 24h volume, deduplicated by pool address."""
-        pools = {}
-        paths = ["/trending_pools?include=base_token&page=1"]
+    def universe(self, pages=3, dexes=()):
+        """Pools from given DEXes (e.g. pumpswap) + trending + top by 24h volume, deduped by address.
+
+        A failing DEX endpoint (unknown id, 404) is skipped so the scan still runs.
+        """
+        pools, errors = {}, []
+        paths = [f"/dexes/{d}/pools?include=base_token&sort=h24_volume_usd_desc&page={p}"
+                 for d in dexes for p in range(1, pages + 1)]
+        paths += ["/trending_pools?include=base_token&page=1"]
         paths += [f"/pools?include=base_token&sort=h24_volume_usd_desc&page={p}" for p in range(1, pages + 1)]
         for path in paths:
-            for p in self._get(path).get("data", []):
+            try:
+                data = self._get(path).get("data", [])
+            except SourceError as e:
+                errors.append(str(e))
+                continue
+            for p in data:
                 pools[p["attributes"]["address"]] = p
+        if not pools and errors:
+            raise SourceError("; ".join(errors[:3]))
         return list(pools.values())
 
     def trades(self, pool_address):
@@ -114,6 +126,17 @@ class SolanaRPC:
     def mint_info(self, mint):
         v = self.call("getAccountInfo", [mint, {"encoding": "jsonParsed"}])["value"]
         return (v or {}).get("data", {}).get("parsed", {}).get("info", {})
+
+    def account_bytes(self, address):
+        import base64
+        v = self.call("getAccountInfo", [address, {"encoding": "base64"}])["value"]
+        return base64.b64decode(v["data"][0]) if v else None
+
+    def token_accounts_by_owner(self, owner, mint):
+        """[(token_account, ui_amount)] of `owner` for `mint`."""
+        res = self.call("getTokenAccountsByOwner", [owner, {"mint": mint}, {"encoding": "jsonParsed"}])["value"]
+        return [(a["pubkey"], float(a["account"]["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount") or 0))
+                for a in res]
 
     def multiple_accounts(self, addresses):
         out = []

@@ -73,7 +73,8 @@ class Engine:
     def scan_once(self):
         cfg = self.cfg
         now = time.time()
-        raw = self.gecko.universe(cfg.universe_pages)
+        dexes = ["pumpswap"] + (["pump-fun"] if cfg.include_bonding_curve else []) if cfg.pump_only else []
+        raw = self.gecko.universe(cfg.universe_pages, dexes)
         pools = S.dedupe_by_token([S.normalize_pool(p, now) for p in raw])
         for p in pools:
             p["filter_reasons"] = S.pool_filter(p, cfg)
@@ -120,7 +121,7 @@ class Engine:
         self._manage_positions(analyze)
 
         rows = [p for p in analyze.values() if p.get("flow")]
-        rows.sort(key=lambda p: (p["mint"] not in self.positions, -p["flow"]["15m"]["buy_share"]))
+        rows.sort(key=lambda p: (p["mint"] not in self.positions, -p["flow"]["15m"]["ratio"]))
         with self.lock:
             self.rows = rows[:10]
             self.universe_stats = {"pools": len(raw), "tokens": len(pools), "passed_filter": len(passed),
@@ -133,12 +134,12 @@ class Engine:
         pos = {
             "mint": p["mint"], "pool": p["pool"], "symbol": p["symbol"],
             "entry_price": p["price_usd"], "entry_time": time.time(), "size_usd": self.cfg.position_usd,
-            "entry_flow": p["flow"]["15m"]["buy_share"], "price": p["price_usd"],
+            "entry_ratio": p["flow"]["15m"]["ratio"], "creator": h.get("creator"), "price": p["price_usd"],
             "whale_snapshot": W.snapshot(h), "whales": None, "pnl_pct": 0.0,
         }
         with self.lock:
             self.positions[p["mint"]] = pos
-        self._event("open", f"ВХОД {p['symbol']} @ ${p['price_usd']:.8g} (покупки 15м {p['flow']['15m']['buy_share']:.0%})",
+        self._event("open", f"ВХОД {p['symbol']} @ ${p['price_usd']:.8g} (покупки/продажи 15м ×{p['flow']['15m']['ratio']:.1f})",
                     mint=p["mint"])
 
     def _manage_positions(self, analyze):
@@ -148,7 +149,7 @@ class Engine:
                 pos["price"] = p["price_usd"]
             flow = p.get("flow") if p else None
             if flow:
-                pos["flow_15m"] = flow["15m"]["buy_share"]
+                pos["ratio_15m"] = flow["15m"]["ratio"]
             try:
                 pos["whales"] = W.compare_snapshot(self.rpc, pos["whale_snapshot"])
             except (SourceError, KeyError, TypeError) as e:

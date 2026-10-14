@@ -25,13 +25,15 @@ def make_engine():
     from tests.fakes import FakeGecko, FakeRPC, pool, trades
     mc.DATA_DIR = me.DATA_DIR = os.path.join(ROOT, "data", "demo")
     g = FakeGecko()
-    names = ["WIF", "BONK", "POPCAT", "MEW", "GOAT", "PNUT", "MOODENG", "FWOG", "MICHI", "RETARDIO", "NEWRUG"]
+    names = ["WIF", "POPCAT", "MEW", "GOAT", "PNUT", "MOODENG", "FWOG", "MICHI", "CHILLGUY", "FARTCOIN", "NEWRUG"]
     for i, n in enumerate(names):
-        mint = (n.replace("I", "i").replace("O", "o") + "1" * 44)[:44]  # base58-valid
-        g.pools.append(pool(f"pool{n}", mint, n, price=0.01 * (i + 1), age_h=3 if n == "NEWRUG" else 24 * (30 + i)))
-        g.trades_by_pool[f"pool{n}"] = trades(900, 45 - 3 * i, 600, 15 + 2 * i)
+        mint = (n.replace("I", "i").replace("O", "o") + "1" * 40)[:40] + "pump"  # base58-valid
+        g.pools.append(pool(f"pool{n}", mint, n, price=0.01 * (i + 1), age_h=3 if n == "NEWRUG" else 24 * (5 + i)))
+        g.trades_by_pool[f"pool{n}"] = trades(900, 45 - 3 * i, 600, 10 + 2 * i)
+    from memescan.solana_util import b58encode
     rpc = FakeRPC(holders=[("LPvault", 300_000_000, False, None)] +
-                  [(f"wallet{i}abcdefghijkl", 15_000_000, True, "devfunder" if i < 2 else f"f{i}") for i in range(12)])
+                  [(f"wallet{i}abcdefghijk", 20_000_000 - i * 1_000_000, True, "devfunder" if i < 2 else f"f{i}")
+                   for i in range(12)], creator=b58encode(b"\x07" * 32), creator_amount=4_000_000)
     return Engine(Config(scan_interval_sec=15), gecko=g, rpc=rpc)
 
 

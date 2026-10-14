@@ -3,6 +3,7 @@
 Cluster heuristic (fast, ~20 RPC calls): for each top wallet find who first funded it
 with SOL. Wallets sharing a funder (or funding each other) = one cluster.
 """
+from .solana_util import bonding_curve_address, parse_bonding_curve, is_pump_mint
 from .sources import SolanaRPC, SourceError
 
 # Exchange hot wallets fund thousands of unrelated users -> never cluster by them.
@@ -20,6 +21,18 @@ EXCHANGE_WALLETS = {
 
 def short(a):
     return f"{a[:4]}…{a[-4:]}" if a and len(a) > 10 else a
+
+
+def find_creator(rpc: SolanaRPC, mint):
+    """pump.fun creator from the on-chain bonding curve account. Returns (creator, curve_complete)."""
+    if not is_pump_mint(mint):
+        return None, None
+    try:
+        data = rpc.account_bytes(bonding_curve_address(mint))
+    except (SourceError, ValueError):
+        return None, None
+    bc = parse_bonding_curve(data) if data else None
+    return (bc["creator"], bc["complete"]) if bc else (None, None)
 
 
 def find_funder(rpc: SolanaRPC, wallet):
@@ -145,6 +158,19 @@ def analyze_holders(rpc: SolanaRPC, mint, with_clusters=True, top_n=10):
         for w in wallets:
             w["cluster"] = cluster_of.get(w["owner"])
 
+        creator, curve_complete = find_creator(rpc, mint)
+        creator_accounts, creator_amount = [], 0.0
+        if creator:
+            for addr, amt in rpc.token_accounts_by_owner(creator, mint):
+                creator_accounts.append(addr)
+                creator_amount += amt
+            for h in holders:
+                if h["owner"] == creator:
+                    h["is_creator"] = True
+                    h["label"] = "создатель " + h["label"]
+        for i, w in enumerate(wallets):
+            w["role"] = "creator" if w["owner"] == creator else ("top3" if i < 3 else "other")
+
         return {
             "mint": mint,
             "supply": supply,
@@ -154,6 +180,11 @@ def analyze_holders(rpc: SolanaRPC, mint, with_clusters=True, top_n=10):
             "top1_pct": wallets[0]["pct"] if wallets else 0.0,
             "top10_pct": round(sum(w["pct"] for w in wallets), 2),
             "clusters": clusters,
+            "creator": creator,
+            "creator_amount": creator_amount,
+            "creator_pct": round(creator_amount / supply * 100, 3) if creator else 0.0,
+            "creator_token_accounts": creator_accounts,
+            "curve_complete": curve_complete,
             "error": None,
         }
     except SourceError as e:
@@ -163,16 +194,20 @@ def analyze_holders(rpc: SolanaRPC, mint, with_clusters=True, top_n=10):
 
 
 def snapshot(h):
-    """What we watch after entry: token accounts of top wallets + cluster membership."""
+    """What we watch after entry: creator + top-10 wallets (top-3 flagged) + cluster membership."""
     wallets = [x for x in h.get("holders", []) if x["kind"] == "wallet"][:10]
-    return {
-        "wallets": [{"owner": w["owner"], "label": w["label"], "cluster": w.get("cluster"),
-                     "token_accounts": w["token_accounts"], "amount": w["amount"]} for w in wallets],
-    }
+    rows = [{"owner": w["owner"], "label": w["label"], "cluster": w.get("cluster"),
+             "role": "creator" if w["owner"] == h.get("creator") else ("top3" if i < 3 else "other"),
+             "token_accounts": w["token_accounts"], "amount": w["amount"]} for i, w in enumerate(wallets)]
+    if h.get("creator") and not any(r["role"] == "creator" for r in rows):
+        rows.append({"owner": h["creator"], "label": "создатель " + short(h["creator"]), "cluster": None,
+                     "role": "creator", "token_accounts": h.get("creator_token_accounts", []),
+                     "amount": h.get("creator_amount", 0.0)})
+    return {"wallets": rows}
 
 
 def compare_snapshot(rpc: SolanaRPC, snap):
-    """Current balances vs entry snapshot -> per-wallet / per-cluster / top-10 drop %."""
+    """Current balances vs entry snapshot -> per-wallet (with role) / per-cluster / top-10 drop %."""
     accs = [ta for w in snap["wallets"] for ta in w["token_accounts"]]
     if not accs:
         return {"wallets": [], "top10_drop_pct": 0.0}
@@ -184,18 +219,20 @@ def compare_snapshot(rpc: SolanaRPC, snap):
         cur[addr] = amt
     rows, clusters = [], {}
     total0 = total1 = 0.0
-    for w in snap["wallets"]:
+    for i, w in enumerate(snap["wallets"]):
         now = sum(cur.get(ta, 0.0) for ta in w["token_accounts"])
-        total0 += w["amount"]
-        total1 += now
-        rows.append({"label": w["label"], "owner": w["owner"], "was": w["amount"], "now": now,
-                     "drop_pct": _drop(w["amount"], now)})
+        if i < 10:  # an off-list creator is appended after the top-10
+            total0 += w["amount"]
+            total1 += now
+        rows.append({"label": w["label"], "owner": w["owner"], "role": w.get("role", "other"),
+                     "was": w["amount"], "now": now, "drop_pct": _drop(w["amount"], now)})
         if w.get("cluster"):
             c = clusters.setdefault(w["cluster"], [0.0, 0.0])
             c[0] += w["amount"]
             c[1] += now
     for label, (was, now) in clusters.items():
-        rows.append({"label": label, "owner": None, "was": was, "now": now, "drop_pct": _drop(was, now)})
+        rows.append({"label": label, "owner": None, "role": "cluster", "was": was, "now": now,
+                     "drop_pct": _drop(was, now)})
     return {"wallets": rows, "top10_drop_pct": _drop(total0, total1)}
 
 

@@ -10,7 +10,7 @@ def iso(ts):
     return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def pool(addr, mint, name, liq=500_000, fdv=10_000_000, vol24=2_000_000, age_h=24 * 30, price=0.01,
+def pool(addr, mint, name, liq=500_000, dex="pumpswap", fdv=10_000_000, vol24=2_000_000, age_h=24 * 30, price=0.01,
          buys=200, sells=100, buyers=120, sellers=60, chg24=5.0, now=None):
     now = now or time.time()
     return {
@@ -22,7 +22,7 @@ def pool(addr, mint, name, liq=500_000, fdv=10_000_000, vol24=2_000_000, age_h=2
             "price_change_percentage": {"h1": "1", "h24": str(chg24)},
             "transactions": {"m15": {"buys": buys, "sells": sells, "buyers": buyers, "sellers": sellers}},
         },
-        "relationships": {"base_token": {"data": {"id": f"solana_{mint}"}}, "dex": {"data": {"id": "raydium"}}},
+        "relationships": {"base_token": {"data": {"id": f"solana_{mint}"}}, "dex": {"data": {"id": dex}}},
     }
 
 
@@ -43,7 +43,7 @@ class FakeGecko:
         self.pools = []
         self.trades_by_pool = {}
 
-    def universe(self, pages=3):
+    def universe(self, pages=3, dexes=()):
         return self.pools
 
     def trades(self, pool_address):
@@ -57,12 +57,16 @@ class FakeRPC:
     """holders: list of (owner, amount, is_wallet, funder). One token account per owner: 'ta_<owner>'."""
     SYSTEM_PROGRAM = SYS
 
-    def __init__(self, supply=1_000_000_000, holders=(), mint_authority=None, freeze_authority=None):
+    def __init__(self, supply=1_000_000_000, holders=(), mint_authority=None, freeze_authority=None,
+                 creator=None, creator_amount=0.0):
         self.supply = supply
         self.holders = list(holders)
         self.mint_authority = mint_authority
         self.freeze_authority = freeze_authority
         self.balances = {f"ta_{o}": amt for o, amt, _, _ in holders}
+        self.creator = creator
+        if creator and f"ta_{creator}" not in self.balances:
+            self.balances[f"ta_{creator}"] = creator_amount
         self.calls = 0
 
     def mint_info(self, mint):
@@ -86,6 +90,16 @@ class FakeRPC:
                 h = next((h for h in self.holders if h[0] == a), None)
                 out.append({"owner": SYS if h and h[2] else AMM})
         return out
+
+    def account_bytes(self, address):
+        if not self.creator:
+            return None
+        from memescan.solana_util import b58decode
+        return bytes(8 + 40) + b"\x01" + b58decode(self.creator)
+
+    def token_accounts_by_owner(self, owner, mint):
+        a = f"ta_{owner}"
+        return [(a, self.balances[a])] if a in self.balances else []
 
     def oldest_signature(self, address, limit=1000):
         return f"sig_{address}", True

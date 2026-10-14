@@ -1,12 +1,19 @@
 """Pure strategy logic: no network, fully unit-testable.
 
-Rule set (the whole strategy):
-  1. Filter:  liquid, not new, not collapsing, sane liquidity/FDV.
-  2. Entry:   buy$ share over 15m >= 62% AND 5m >= 60%, enough $ and many distinct buyers.
-  3. Exit:    buy$ share 15m <= 52% (equilibrium)  OR  whales/cluster selling  OR  -15% stop.
+Rule set (the whole strategy, pump.fun):
+  1. Filter:  pump.fun coin, graduated, liquid, not new, sane holders.
+  2. Entry:   buy$ >= 2x sell$ over 15m AND 5m, enough $ and many distinct buyers.
+  3. Hold while buy$ >= 2x sell$ (15m). Exit when it drops below, OR the creator
+     sells, OR any of the top-3 holders / a linked cluster sells, OR -15% stop.
 """
 import math
 import time
+
+from .solana_util import is_pump_mint
+
+PUMP_DEXES = {"pump-fun", "pumpswap", "pump-swap"}
+BONDING_CURVE_DEXES = {"pump-fun"}
+RATIO_CAP = 99.0
 from datetime import datetime
 
 # Non-meme majors / stables / wrapped assets on Solana: never treat as memecoins.
@@ -88,6 +95,10 @@ def dedupe_by_token(pools):
 def pool_filter(p, cfg):
     """Return list of rejection reasons (empty = passes)."""
     r = []
+    if cfg.pump_only and not (is_pump_mint(p["mint"]) or p["dex"] in PUMP_DEXES):
+        r.append("не pump.fun")
+    if not cfg.include_bonding_curve and p["dex"] in BONDING_CURVE_DEXES:
+        r.append("ещё на bonding curve (не мигрировала)")
     if p["mint"] in EXCLUDED_MINTS:
         r.append("не мемкоин (major/stable)")
     if p["liquidity_usd"] < cfg.min_liquidity_usd:
@@ -143,6 +154,7 @@ def flow_metrics(trades, now=None):
             "buy_usd": round(buy_usd, 2),
             "sell_usd": round(sell_usd, 2),
             "buy_share": buy_usd / total if total else 0.5,
+            "ratio": min(buy_usd / sell_usd, RATIO_CAP) if sell_usd else (RATIO_CAP if buy_usd else 1.0),
             "buyers": len(buyers),
             "sellers": len(sellers),
             "top_buyer_share": (max(per_buyer.values()) / buy_usd) if buy_usd else 0.0,
@@ -157,10 +169,10 @@ def entry_check(flow, cfg):
     """Return list of unmet entry conditions (empty = ENTRY signal)."""
     f15, f5 = flow["15m"], flow["5m"]
     r = []
-    if f15["buy_share"] < cfg.entry_buy_share_15m:
-        r.append(f"покупки 15м {f15['buy_share']:.0%} < {cfg.entry_buy_share_15m:.0%}")
-    if f5["buy_share"] < cfg.entry_buy_share_5m:
-        r.append(f"покупки 5м {f5['buy_share']:.0%} < {cfg.entry_buy_share_5m:.0%}")
+    if f15["ratio"] < cfg.entry_ratio_15m:
+        r.append(f"покупки/продажи 15м ×{f15['ratio']:.1f} < ×{cfg.entry_ratio_15m:g}")
+    if f5["ratio"] < cfg.entry_ratio_5m:
+        r.append(f"покупки/продажи 5м ×{f5['ratio']:.1f} < ×{cfg.entry_ratio_5m:g}")
     if f15["buy_usd"] < cfg.min_buy_usd_15m:
         r.append(f"покупки 15м ${f15['buy_usd']:,.0f} < ${cfg.min_buy_usd_15m:,.0f}")
     if f15["buyers"] < cfg.min_unique_buyers_15m:
@@ -179,6 +191,8 @@ def holders_check(h, cfg):
         r.append("mint authority активен (можно допечатать)")
     if cfg.require_no_freeze_authority and h.get("freeze_authority"):
         r.append("freeze authority активен (могут заморозить)")
+    if h.get("creator_pct", 0) > cfg.max_creator_pct:
+        r.append(f"у создателя {h['creator_pct']:.1f}% > {cfg.max_creator_pct:.0f}%")
     if h["top1_pct"] > cfg.max_top1_holder_pct:
         r.append(f"крупнейший кошелёк {h['top1_pct']:.1f}% > {cfg.max_top1_holder_pct:.0f}%")
     if h["top10_pct"] > cfg.max_top10_holders_pct:
@@ -191,18 +205,19 @@ def holders_check(h, cfg):
 
 
 def exit_check(position, flow, price, whale_moves, cfg):
-    """Return exit reason or None. whale_moves = whales.compare_snapshot output."""
+    """Return exit reason or None. whale_moves = whales.compare_snapshot output (rows carry a role)."""
     pnl = (price / position["entry_price"] - 1) * 100 if position["entry_price"] else 0
     if pnl <= cfg.stop_loss_pct:
         return f"стоп {pnl:.1f}%"
-    if whale_moves:
-        for w in whale_moves.get("wallets", []):
-            if w["drop_pct"] >= cfg.whale_exit_drop_pct:
-                return f"кит {w['label']} продал {w['drop_pct']:.0f}%"
-        if whale_moves.get("top10_drop_pct", 0) >= cfg.whale_exit_top10_drop_pct:
-            return f"топ-10 продали {whale_moves['top10_drop_pct']:.0f}%"
-    if flow and flow["15m"]["buy_share"] <= cfg.exit_buy_share_15m:
-        return f"перевес ушёл: покупки 15м {flow['15m']['buy_share']:.0%}"
+    limits = {"creator": cfg.creator_exit_drop_pct, "top3": cfg.top3_exit_drop_pct,
+              "cluster": cfg.cluster_exit_drop_pct}
+    who = {"creator": "создатель", "top3": "топ-3 холдер", "cluster": ""}
+    for w in (whale_moves or {}).get("wallets", []):
+        lim = limits.get(w.get("role"))
+        if lim is not None and w["drop_pct"] >= lim:
+            return f"{who[w['role']]} {w['label']} продал {w['drop_pct']:.0f}%".strip()
+    if flow and flow["15m"]["ratio"] < cfg.exit_ratio_15m:
+        return f"перевес ушёл: покупки/продажи 15м ×{flow['15m']['ratio']:.1f}"
     return None
 
 
