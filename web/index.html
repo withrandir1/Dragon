@@ -81,7 +81,7 @@ function velHtml(v){
   if(!v)return '<span class="mut">ждём первый скан…</span>';
   if(v.status&&v.v1===undefined)return `<span class="${/ошибка|не знает|пуст/.test(v.status)?'neg':'mut'}">${esc(v.status)}</span>`;
   const i=v.inertia;
-  return `<div class="vrow">${sp(v.v1,2)} ${sp(v.v15,1)} ${sp(v.v30,1)}</div><div class="inert ${i>0?'pos':i<0?'neg':'mut'}">${i==null?'копим 30с…':(i>0?'+':'')+i.toFixed(1)+'%/мин'} ${TR[v.trend]||''}</div><div class="mut" style="font-size:10px">${v.src==='chain'?'on-chain':v.src==='dexscreener'?'DexScreener':''}</div>`;
+  return `<div class="vrow">${sp(v.v1,2)} ${sp(v.v15,1)} ${sp(v.v30,1)}</div><div class="inert ${i>0?'pos':i<0?'neg':'mut'}">${i==null?'копим 15с…':(i>0?'+':'')+i.toFixed(1)+'%/мин'} ${TR[v.trend]||''}</div><div class="mut" style="font-size:10px">${v.src==='chain'?'on-chain':v.src==='dexscreener'?'DexScreener':''}</div>`;
 }
 function applyLive(l){
   LIVE=l||{};

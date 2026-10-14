@@ -46,7 +46,7 @@ def velocity(samples, now=None):
         change = (p_last / ref[1] - 1) * 100
         out[f"v{w}"] = round(change, 3)
         rates[w] = math.log(p_last / ref[1]) * 100 / (t_last - ref[0])  # log-%/s: steady growth = equal rates
-    if rates:
+    if 15 in rates:  # 1s alone is too noisy to call it inertia
         wsum = sum(WEIGHTS[w] for w in rates)
         out["inertia"] = round(60 * sum(WEIGHTS[w] * r for w, r in rates.items()) / wsum, 3)  # %/min
     else:
