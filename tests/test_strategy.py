@@ -181,7 +181,10 @@ class TestEngine(unittest.TestCase):
         self.e.scan_once()
         c = self.e.closed[-1]
         self.assertIn("перевес ушёл", c["exit_reason"])
-        self.assertAlmostEqual(c["pnl_pct"], (1.3 * 0.985 ** 2 - 1) * 100, places=4)
+        from memescan import economics as E
+        cost = E.round_trip_cost(E.position_size(500_000, Config()), 500_000, Config())["total"]
+        self.assertAlmostEqual(c["pnl_pct"], 30 - cost, places=4)
+        self.assertAlmostEqual(c["size_usd"], 66.67)              # 1% of $1000 risked at a -15% stop
 
     def test_stop_loss(self):
         self.e.scan_once()
@@ -221,6 +224,65 @@ class TestVelocity(unittest.TestCase):
         self.assertIsNone(v["v15"])
         self.assertIsNone(v["v30"])
         self.assertEqual(v["v1"], 0.0)
+
+
+class TestEconomics(unittest.TestCase):
+    def test_size_and_cost(self):
+        from memescan import economics as E
+        cfg = Config()
+        self.assertAlmostEqual(E.position_size(500_000, cfg), 66.67)          # risk cap
+        self.assertAlmostEqual(E.position_size(10_000, cfg), 25.0)            # impact cap: 0.5% of $5K
+        c = E.round_trip_cost(100, 50_000, cfg)
+        self.assertAlmostEqual(c["fees"], 2.0)
+        self.assertAlmostEqual(c["impact"], 0.8)                               # 2 * 100 / 25_000
+        self.assertAlmostEqual(c["fixed"], 0.3)                                # 2 * 0.15 / 100
+        self.assertAlmostEqual(c["total"], 3.1)
+
+    def test_verdicts(self):
+        from memescan import economics as E
+        from memescan.research import Research
+        cfg = Config(min_samples=3)
+        r = Research()
+        p = {"liquidity_usd": 500_000, "flow": {"15m": {"ratio": 2.5}}}
+        self.assertEqual(E.entry_economics(p, r, cfg)["verdict"], "no_stats")
+        r.done = [{"ratio15": 2.5, "r5": 1, "r15": x, "r30": 1} for x in (8, 9, 10)]
+        e = E.entry_economics(p, r, cfg)
+        self.assertEqual((e["verdict"], e["expected_pct"]), ("ok", 9.0))     # 9% >= 2 x 2.5%
+        r.done = [{"ratio15": 2.5, "r5": 1, "r15": x, "r30": 1} for x in (1, 2, 3)]
+        self.assertEqual(E.entry_economics(p, r, cfg)["verdict"], "weak")
+        thin = {"liquidity_usd": 4_000, "flow": {"15m": {"ratio": 2.5}}}
+        self.assertEqual(E.entry_economics(thin, r, cfg)["verdict"], "costly")
+
+
+class TestResearch(unittest.TestCase):
+    def test_forward_returns_by_bucket(self):
+        from memescan.research import Research
+        r = Research()
+        p = {"mint": "A", "price_usd": 1.0, "liquidity_usd": 1, "flow": trades_flow(2.5)}
+        r.record(p, 0)
+        r.record(p, 60)                         # same coin within 5 min -> not double counted
+        self.assertEqual(len(r.open), 1)
+        r.update({"A": 1.10}, 5 * 60)
+        r.update({"A": 1.20}, 15 * 60)
+        r.update({"A": 0.90}, 30 * 60)
+        self.assertEqual(len(r.done), 1)
+        row = next(x for x in r.table()["rows"] if x["bucket"] == "×2–3")
+        self.assertAlmostEqual(row["m5"], 10.0)
+        self.assertAlmostEqual(row["m15"], 20.0)
+        self.assertAlmostEqual(row["m30"], -10.0)
+        self.assertEqual(r.expected(2.2, 15), (20.0, 1))
+
+    def test_vanished_coin_dropped(self):
+        from memescan.research import Research
+        r = Research()
+        r.record({"mint": "A", "price_usd": 1.0, "liquidity_usd": 1, "flow": trades_flow(1.5)}, 0)
+        r.update({}, 31 * 60 + 600)
+        self.assertEqual(r.done[0]["r30"], None)
+        self.assertEqual(r.table()["rows"][1]["n30"], 0)
+
+
+def trades_flow(ratio):
+    return {"15m": {"ratio": ratio, "buy_usd": 1000}, "5m": {"ratio": ratio}}
 
 
 class TestTickerRoutes(unittest.TestCase):
@@ -303,6 +365,21 @@ class TestMomentumAndLive(unittest.TestCase):
         self.e.scan_once()
         self.assertEqual(self.e.positions, {})
         self.assertIn("не растёт", self.e.rows[0]["holder_reasons"][0])
+
+    def test_creator_exit_within_a_second(self):
+        t0 = time.time() - 80
+        self.e.ticker.set_watch({MINT: "pMEME"})
+        self.feed(35, 1.001, t0)
+        self.e.scan_once()
+        self.assertIn(MINT, self.e.positions)
+        self.e.ticker.tick(now=t0 + 36)                         # ticker now also reads whale balances
+        self.e.on_tick()
+        self.assertIn(MINT, self.e.positions)
+        self.rpc.balances[f"ta_{CREATOR}"] *= 0.5                # creator dumps half
+        self.e.ticker.tick(now=t0 + 37)
+        self.e.on_tick()
+        self.assertNotIn(MINT, self.e.positions)
+        self.assertIn("создатель", self.e.closed[-1]["exit_reason"])
 
     def test_live_stop_every_second(self):
         t0 = time.time() - 80

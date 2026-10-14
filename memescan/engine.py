@@ -5,8 +5,10 @@ import threading
 import time
 import traceback
 
+from . import economics as E
 from . import strategy as S
 from . import whales as W
+from .research import Research
 from .config import Config, DATA_DIR
 from .sources import Gecko, SolanaRPC, SourceError
 from .ticker import PriceTicker
@@ -33,6 +35,7 @@ class Engine:
         self.pending = {}           # mint -> {"p", "h", "until"}: entry waiting for live momentum
         self.ticker = PriceTicker(self.rpc, self.cfg.tick_interval_sec, dex=dex)
         self.ticker.on_tick = self.on_tick
+        self.research = Research(os.path.join(DATA_DIR, "research.jsonl"))
         self._wake = threading.Event()
         self._load()
 
@@ -45,6 +48,8 @@ class Engine:
             with open(self._state_path()) as f:
                 d = json.load(f)
             self.positions, self.closed = d.get("positions", {}), d.get("closed", [])
+            for pos in self.positions.values():  # positions saved by older versions
+                pos.setdefault("cost_pct", 3.0)
         except (OSError, ValueError):
             pass
 
@@ -105,13 +110,25 @@ class Engine:
             except SourceError as e:
                 p["flow"], p["entry_missing"] = None, [str(e)]
 
-        # Entry signals -> holder check -> paper entry
+        # Hypothesis check: log every analyzed coin, fill forward returns from current prices
         for p in analyze.values():
+            p["velocity"] = self.ticker.velocity(p["mint"])
+            self.research.record(p, now)
+        self.research.update({p["mint"]: p["price_usd"] for p in pools if p["price_usd"]}, now)
+
+        # Entry signals -> economics -> holder check -> paper entry
+        for p in analyze.values():
+            if p.get("flow"):
+                p["econ"] = E.entry_economics(p, self.research, cfg)
             p["signal"] = "watch"
             if p.get("flow") and not p["entry_missing"] and not p["filter_reasons"]:
                 p["signal"] = "entry"
                 if p["mint"] in self.positions:
                     p["signal"] = "holding"
+                    continue
+                econ_bad = E.reason(p["econ"], cfg)
+                if econ_bad and not (p["econ"]["verdict"] == "no_stats" and cfg.trade_without_stats):
+                    p["holder_reasons"] = [econ_bad]
                     continue
                 h = self.get_holders(p["mint"])
                 p["holder_reasons"] = h["reasons"]
@@ -130,6 +147,7 @@ class Engine:
         watch.update({m: pos["pool"] for m, pos in self.positions.items()})
         watch.update({m: x["p"]["pool"] for m, x in self.pending.items()})
         self.ticker.set_watch(watch)
+        self.ticker.set_extra([a for pos in self.positions.values() for a in W.snapshot_accounts(pos["whale_snapshot"])])
         with self.lock:
             self.rows = rows[:10]
             self.universe_stats = {"pools": len(raw), "tokens": len(pools), "passed_filter": len(passed),
@@ -186,21 +204,31 @@ class Engine:
                 pos["entry_tick"] = live
                 pos["entry_tick_price_usd"] = pos["price"]
             pos["price"] = pos["entry_tick_price_usd"] * live / pos["entry_tick"]
-            pos["pnl_pct"] = S.paper_pnl(pos["entry_price"], pos["price"], self.cfg.cost_per_side_pct)
-            reason = S.exit_check(pos, None, pos["price"], None, self.cfg)  # stop only, every second
+            pos["pnl_pct"] = S.paper_pnl(pos["entry_price"], pos["price"], pos["cost_pct"])
+        for mint, pos in list(self.positions.items()):
+            accs = W.snapshot_accounts(pos["whale_snapshot"])
+            whales = None
+            if accs and all(a in self.ticker.token_bal for a in accs):
+                whales = W.compare_balances(pos["whale_snapshot"], self.ticker.token_bal)
+                pos["whales"] = whales
+            # stop + creator / top-3 / cluster selling, every second (flow exit stays per scan)
+            reason = S.exit_check(pos, None, pos["price"], whales, self.cfg)
             if reason:
                 self.close(mint, reason)
 
     def live(self):
         with self.lock:
-            pos = {m: {"price": p["price"], "pnl_pct": p["pnl_pct"]} for m, p in self.positions.items()}
+            pos = {m: {"price": p["price"], "pnl_pct": p["pnl_pct"], "whales": p.get("whales")}
+                   for m, p in self.positions.items()}
         return {"velocity": self.ticker.all(), "positions": pos, "ticker_error": self.ticker.last_error,
                 "pending": list(self.pending), "t": time.time()}
 
     def _open(self, p, h):
+        econ = p.get("econ") or E.entry_economics(p, self.research, self.cfg)
         pos = {
             "mint": p["mint"], "pool": p["pool"], "symbol": p["symbol"],
-            "entry_price": p["price_usd"], "entry_time": time.time(), "size_usd": self.cfg.position_usd,
+            "entry_price": p["price_usd"], "entry_time": time.time(), "size_usd": econ["size_usd"],
+            "cost_pct": econ["cost"]["total"], "econ": econ,
             "entry_ratio": p["flow"]["15m"]["ratio"], "creator": h.get("creator"), "price": p["price_usd"],
             "whale_snapshot": W.snapshot(h), "whales": None, "pnl_pct": 0.0,
             "entry_velocity": self.ticker.velocity(p["mint"]),
@@ -210,7 +238,8 @@ class Engine:
             pos["entry_tick"], pos["entry_tick_price_usd"] = live, p["price_usd"]
         with self.lock:
             self.positions[p["mint"]] = pos
-        self._event("open", f"ВХОД {p['symbol']} @ ${p['price_usd']:.8g} (покупки/продажи 15м ×{p['flow']['15m']['ratio']:.1f})",
+        self._event("open", f"ВХОД {p['symbol']} ${econ['size_usd']:.0f} @ ${p['price_usd']:.8g} "
+                            f"(×{p['flow']['15m']['ratio']:.1f}, издержки {econ['cost']['total']:.1f}%)",
                     mint=p["mint"])
 
     def _manage_positions(self, analyze):
@@ -227,7 +256,7 @@ class Engine:
                 pos["whales"] = W.compare_snapshot(self.rpc, pos["whale_snapshot"])
             except (SourceError, KeyError, TypeError) as e:
                 pos["whales_error"] = str(e)
-            pos["pnl_pct"] = S.paper_pnl(pos["entry_price"], pos["price"], self.cfg.cost_per_side_pct)
+            pos["pnl_pct"] = S.paper_pnl(pos["entry_price"], pos["price"], pos["cost_pct"])
             reason = S.exit_check(pos, flow, pos["price"], pos.get("whales"), self.cfg)
             if reason:
                 self.close(mint, reason)
@@ -238,7 +267,7 @@ class Engine:
             if not pos:
                 return None
             pos.update(exit_time=time.time(), exit_price=pos["price"], exit_reason=reason,
-                       pnl_pct=S.paper_pnl(pos["entry_price"], pos["price"], self.cfg.cost_per_side_pct))
+                       pnl_pct=S.paper_pnl(pos["entry_price"], pos["price"], pos["cost_pct"]))
             pos["pnl_usd"] = pos["size_usd"] * pos["pnl_pct"] / 100
             pos.pop("whale_snapshot", None)
             self.closed.append(pos)
@@ -283,6 +312,8 @@ class Engine:
                     "pnl_usd": round(sum(c.get("pnl_usd", 0) for c in closed), 2),
                 },
                 "events": self.events[-40:][::-1],
+                "research": self.research.table(),
+                "bankroll": self.cfg.bankroll_usd,
                 "last_scan": self.last_scan,
                 "last_error": self.last_error,
                 "scanning": self.scanning,

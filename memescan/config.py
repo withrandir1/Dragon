@@ -43,10 +43,19 @@ class Config:
     cluster_exit_drop_pct: float = 20       # linked-wallet cluster sold >= 20%
     stop_loss_pct: float = -15              # hard stop, capital preservation
 
-    # --- Paper trading ---
-    position_usd: float = 100
+    # --- 5. Money: size + is the move worth the costs (see economics.py) ---
+    bankroll_usd: float = 1000              # paper bankroll
+    risk_per_trade_pct: float = 1.0         # a stop-out loses at most 1% of bankroll
+    max_position_usd: float = 250
+    max_impact_per_side_pct: float = 0.5    # our own order moves price at most 0.5%
+    fee_per_side_pct: float = 1.0           # PumpSwap pool+protocol+creator fee (tiered by mcap; verify)
+    fixed_cost_per_tx_usd: float = 0.15     # priority fee / tip per transaction
+    max_round_trip_cost_pct: float = 4.0    # skip coins where the round trip alone costs more
+    min_edge_multiple: float = 2.0          # expected move must be >= 2x round-trip cost
+    ev_horizon_min: int = 15                # horizon of the expected move (research table)
+    min_samples: int = 30                   # signals needed before the expectation is trusted
+    trade_without_stats: bool = True        # paper only: trade while stats accumulate
     max_open_positions: int = 3
-    cost_per_side_pct: float = 1.5          # fee + slippage assumption per side
 
     # --- Runtime ---
     scan_interval_sec: int = 90

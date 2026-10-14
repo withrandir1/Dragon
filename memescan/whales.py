@@ -206,21 +206,26 @@ def snapshot(h):
     return {"wallets": rows}
 
 
+def snapshot_accounts(snap):
+    return [ta for w in snap["wallets"] for ta in w["token_accounts"]]
+
+
 def compare_snapshot(rpc: SolanaRPC, snap):
-    """Current balances vs entry snapshot -> per-wallet (with role) / per-cluster / top-10 drop %."""
-    accs = [ta for w in snap["wallets"] for ta in w["token_accounts"]]
-    if not accs:
-        return {"wallets": [], "top10_drop_pct": 0.0}
+    """Fetch current balances, then compare_balances."""
+    accs = snapshot_accounts(snap)
     cur = {}
-    for addr, acc in zip(accs, rpc.multiple_accounts(accs)):
-        amt = 0.0
-        if acc:
-            amt = float(acc["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount") or 0)
-        cur[addr] = amt
+    for addr, acc in zip(accs, rpc.multiple_accounts(accs) if accs else []):
+        cur[addr] = float(acc["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount") or 0) if acc else 0.0
+    return compare_balances(snap, cur)
+
+
+def compare_balances(snap, cur):
+    """Entry snapshot vs current {token_account: amount} -> per-wallet (with role) / per-cluster / top-10 drop %.
+    A closed / missing token account counts as fully sold."""
     rows, clusters = [], {}
     total0 = total1 = 0.0
     for i, w in enumerate(snap["wallets"]):
-        now = sum(cur.get(ta, 0.0) for ta in w["token_accounts"])
+        now = sum(cur.get(ta) or 0.0 for ta in w["token_accounts"])
         if i < 10:  # an off-list creator is appended after the top-10
             total0 += w["amount"]
             total1 += now

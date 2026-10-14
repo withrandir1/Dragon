@@ -221,10 +221,8 @@ def exit_check(position, flow, price, whale_moves, cfg):
     return None
 
 
-def paper_pnl(entry_price, price, cost_pct):
-    """Net PnL % after costs on both sides."""
+def paper_pnl(entry_price, price, round_trip_cost_pct):
+    """Net PnL % = price move minus the round-trip cost estimated at entry (economics.py)."""
     if not entry_price:
         return 0.0
-    gross = price / entry_price
-    net = gross * (1 - cost_pct / 100) ** 2
-    return (net - 1) * 100
+    return (price / entry_price - 1) * 100 - round_trip_cost_pct

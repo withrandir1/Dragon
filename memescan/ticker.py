@@ -80,6 +80,9 @@ class PriceTicker:
         self.samples = {}     # mint -> deque[(t, price)]
         self.last_error = None
         self._last_dex = 0.0
+        self.extra = []       # token accounts to read every tick (whales of open positions)
+        self.token_bal = {}   # token account -> amount (0 if closed)
+        self.token_bal_t = 0.0
         self.on_tick = None   # callback after each tick
 
     def set_watch(self, mapping):
@@ -90,6 +93,10 @@ class PriceTicker:
                     del self.samples[m]
             for m in mapping:
                 self.status.setdefault(m, "ищу пул…")
+
+    def set_extra(self, accounts):
+        with self.lock:
+            self.extra = list(dict.fromkeys(accounts))
 
     def _discover(self, items):
         """items: [(mint, pool)] without a route yet. One batched RPC call + per-pool fallback."""
@@ -133,17 +140,22 @@ class PriceTicker:
         chain = [(m, self.route[p]) for m, p in watch.items() if self.route.get(p, ("",))[0] == "chain"]
         dex = [(m, p) for m, p in watch.items() if self.route.get(p, ("",))[0] == "dexscreener"]
         errors = []
-        if chain:
+        with self.lock:
+            extra = list(self.extra)
+        if chain or extra:
             addrs = [a for _, r in chain for a in r[1:]]
             try:
-                accs = self.rpc.multiple_accounts(addrs)
+                accs = self.rpc.multiple_accounts(addrs + extra)
                 bal = {}
-                for a, acc in zip(addrs, accs):
+                for a, acc in zip(addrs + extra, accs):
                     try:
                         bal[a] = float(acc["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount") or 0)
                     except (TypeError, KeyError):
                         bal[a] = 0.0
                 with self.lock:
+                    for a in extra:
+                        self.token_bal[a] = bal.get(a, 0.0)
+                    self.token_bal_t = now
                     for mint, (_, bv, qv) in chain:
                         if bal.get(bv):
                             self._add(mint, now, bal[qv] / bal[bv], "chain")
