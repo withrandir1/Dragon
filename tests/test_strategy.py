@@ -444,5 +444,62 @@ class TestMomentumAndLive(unittest.TestCase):
         self.assertIn("стоп", self.e.closed[-1]["exit_reason"])
 
 
+def wallet_keys(n, seed=1):
+    """n distinct on-curve (wallet-like) pubkeys."""
+    import hashlib
+    from memescan.solana_util import is_on_curve
+    out, i = [], 0
+    while len(out) < n:
+        h = hashlib.sha256(f"{seed}-{i}".encode()).digest()
+        if is_on_curve(h):
+            out.append(b58encode(h))
+        i += 1
+    return out
+
+
+class TestReplay(unittest.TestCase):
+    def ev(self, t, signer, post, dtok, price):
+        return {"t": t, "slot": t, "signer": signer, "post": post, "delta": {signer: dtok}, "dsol": 0,
+                "dtok": dtok, "price": price}
+
+    def test_signal_fires_when_top_holder_starts_selling(self):
+        from memescan.replay import replay
+        creator, whale, early1, user, other = wallet_keys(5)
+        from memescan.solana_util import bonding_curve_address
+        curve = bonding_curve_address(creator)  # a real PDA: off-curve -> not a wallet
+        ev = [
+            self.ev(0, creator, {creator: 20e6, curve: 980e6}, 20e6, 1.0),
+            self.ev(10, early1, {early1: 30e6}, 30e6, 1.1),
+            self.ev(20, whale, {whale: 80e6}, 80e6, 1.5),
+            self.ev(30, user, {user: 5e6}, 5e6, 2.0),          # entry
+            self.ev(60, other, {other: 1e6}, 1e6, 3.0),
+            self.ev(90, other, {other: 2e6}, 1e6, 4.0),         # peak
+            self.ev(100, whale, {whale: 50e6}, -30e6, 3.6),     # whale sells 37.5% -> signal
+            self.ev(101, other, {other: 3e6}, 1e6, 3.5),
+            self.ev(103, other, {other: 2e6}, -1e6, 3.2),
+            self.ev(110, creator, {creator: 0}, -20e6, 1.0),    # dump
+            self.ev(200, user, {user: 0}, -5e6, 0.8),           # user exits too late
+        ]
+        r = replay(ev, 3, user, creator)
+        self.assertEqual(r["tracked"]["top3"][0], whale)
+        self.assertEqual(r["signal"]["t"], 100)
+        self.assertIn("топ-3", r["signal"]["reason"])
+        self.assertEqual(r["exits"][0], 3.5)                 # next trade after the signal
+        self.assertEqual(r["exits"][2], 3.2)                 # 2s later
+        self.assertEqual(r["peak"], 4.0)
+        self.assertEqual(r["user_exit"]["price"], 0.8)
+        self.assertEqual(r["final"], 0.8)
+
+    def test_parse_tx(self):
+        from memescan.replay import parse_tx
+        tx = {"blockTime": 5, "slot": 9, "transaction": {"message": {"accountKeys": [{"pubkey": "U"}]}},
+              "meta": {"err": None, "preBalances": [2_000_000_000], "postBalances": [1_000_000_000],
+                       "preTokenBalances": [], "postTokenBalances": [
+                           {"mint": "M", "owner": "U", "uiTokenAmount": {"uiAmount": 1000.0}}]}}
+        e = parse_tx(tx, "M")
+        self.assertEqual((e["signer"], e["dtok"], e["dsol"]), ("U", 1000.0, -1.0))
+        self.assertAlmostEqual(e["price"], 0.001)
+
+
 if __name__ == "__main__":
     unittest.main()
