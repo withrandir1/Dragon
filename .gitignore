@@ -1,3 +1,8 @@
 data/
 __pycache__/
 *.pyc
+dragon.db*
+*.log
+.*.pid
+paper_state.json
+paper_state.json.tmp
